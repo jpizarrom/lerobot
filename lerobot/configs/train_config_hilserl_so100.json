@@ -1,0 +1,334 @@
+{
+    "output_dir": null,
+    "job_name": "default",
+    "resume": false,
+    "seed": 1000,
+    "num_workers": 4,
+    "batch_size": 64,
+    "steps": 100000,
+    "log_freq": 100,
+    "save_checkpoint": true,
+    "save_freq": 5000,
+    "wandb": {
+        "enable": true,
+        "project": "so100_real",
+        "disable_artifact": true
+    },
+    "dataset": {
+        "repo_id": "jpizarrom/hilserl_so100_push_v3_replay_buffer",
+        "use_imagenet_stats": false
+    },
+    "policy": {
+        "type": "sac",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "VISUAL": "MEAN_STD",
+            "STATE": "MIN_MAX",
+            "ENV": "MIN_MAX",
+            "ACTION": "MIN_MAX"
+        },
+        "input_features": {
+            "observation.images.top": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    128,
+                    128
+                ]
+            },
+            "observation.images.front": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    128,
+                    128
+                ]
+            },
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    21
+                ]
+            }
+        },
+        "device": "cuda",
+        "use_amp": false,
+        "dataset_stats": {
+            "observation.images.top": {
+                "mean": [
+                    0.485,
+                    0.456,
+                    0.406
+                ],
+                "std": [
+                    0.229,
+                    0.224,
+                    0.225
+                ]
+            },
+            "observation.images.front": {
+                "mean": [
+                    0.485,
+                    0.456,
+                    0.406
+                ],
+                "std": [
+                    0.229,
+                    0.224,
+                    0.225
+                ]
+            },
+            "observation.state": {
+                "min": [
+                    -33.846153259277344,
+                    -42.241756439208984,
+                    30.505495071411133,
+                    18.41758155822754,
+                    4.351648330688477,
+                    4.676018714904785,
+                    -69.45054626464844,
+                    -105.4945068359375,
+                    -98.46153259277344,
+                    -107.25274658203125,
+                    -7.032966613769531,
+                    -3.340015411376953,
+                    -33.4945068359375,
+                    -42.241756439208984,
+                    30.505495071411133,
+                    18.41758155822754,
+                    4.351648330688477,
+                    4.809619426727295,
+                    0.17996379733085632,
+                    -0.22000184655189514,
+                    0.15633907914161682
+                ],
+                "max": [
+                    45.098899841308594,
+                    16.74725341796875,
+                    76.57142639160156,
+                    68.79120635986328,
+                    5.230769157409668,
+                    5.143620491027832,
+                    85.27473449707031,
+                    98.46153259277344,
+                    77.36263275146484,
+                    82.63734436035156,
+                    6.15384578704834,
+                    2.6720142364501953,
+                    45.010990142822266,
+                    16.83516502380371,
+                    76.57142639160156,
+                    68.79120635986328,
+                    5.230769157409668,
+                    5.143620491027832,
+                    0.3790964186191559,
+                    0.1836259514093399,
+                    0.33566808700561523
+                ]
+            },
+            "action": {
+                "min": [
+                    -0.03,
+                    -0.03,
+                    -0.03
+                ],
+                "max": [
+                    0.03,
+                    0.03,
+                    0.03
+                ]
+            }
+        },
+        "num_discrete_actions": null,
+        "storage_device": "cuda",
+        "vision_encoder_name": "helper2424/resnet10",
+        "freeze_vision_encoder": true,
+        "image_encoder_hidden_dim": 32,
+        "shared_encoder": true,
+        "online_steps": 1000000,
+        "online_env_seed": 10000,
+        "online_buffer_capacity": 20000,
+        "offline_buffer_capacity": 10000,
+        "online_step_before_learning": 100,
+        "policy_update_freq": 1,
+        "discount": 0.97,
+        "async_prefetch": false,
+        "temperature_init": 0.01,
+        "num_critics": 2,
+        "num_subsample_critics": null,
+        "critic_lr": 0.0003,
+        "actor_lr": 0.0003,
+        "temperature_lr": 0.0003,
+        "critic_target_update_weight": 0.005,
+        "utd_ratio": 2,
+        "state_encoder_hidden_dim": 256,
+        "latent_dim": 256,
+        "target_entropy": null,
+        "use_backup_entropy": true,
+        "grad_clip_norm": 40.0,
+        "critic_network_kwargs": {
+            "hidden_dims": [
+                256,
+                256
+            ],
+            "activate_final": true,
+            "final_activation": null
+        },
+        "actor_network_kwargs": {
+            "hidden_dims": [
+                256,
+                256
+            ],
+            "activate_final": true
+        },
+        "policy_kwargs": {
+            "use_tanh_squash": true,
+            "std_min": -5,
+            "std_max": 2,
+            "init_final": 0.05
+        },
+        "actor_learner_config": {
+            "learner_host": "127.0.0.1",
+            "learner_port": 50051,
+            "policy_parameters_push_frequency": 4
+        },
+        "concurrency": {
+            "actor": "threads",
+            "learner": "threads"
+        }
+    },
+    "env": {
+        "type": "gym_manipulator",
+        "robot": {
+            "type": "so100_follower_end_effector",
+            "port": "/dev/usb_follower_arm",
+            "id": "main_follower",
+            "cameras": {
+                "top": {
+                    "type": "opencv",
+                    "index_or_path": 6,
+                    "height": 480,
+                    "width": 640,
+                    "fps": 30
+                },
+                "front": {
+                    "type": "opencv",
+                    "index_or_path": 8,
+                    "height": 480,
+                    "width": 640,
+                    "fps": 30
+                }
+            },
+            "end_effector_bounds": {
+                "min": [
+                    0.2713,
+                    -0.1806,
+                    0.2194
+                ],
+                "max": [
+                    0.332,
+                    0.1078,
+                    0.328
+                ]
+            },
+            "end_effector_step_sizes": {
+                "x": 0.025,
+                "y": 0.025,
+                "z": 0.025
+            },
+            "max_gripper_pos": 30
+        },
+        "teleop": {
+            "type": "so100_leader",
+            "port": "/dev/usb_leader_arm",
+            "id": "main_leader"
+        },
+        "wrapper": {
+            "display_cameras": true,
+            "add_joint_velocity_to_observation": true,
+            "add_current_to_observation": true,
+            "add_ee_pose_to_observation": true,
+            "crop_params_dict": {
+            "observation.images.top": [
+                79,
+                151,
+                237,
+                321
+            ],
+            "observation.images.front": [
+                269,
+                79,
+                196,
+                393
+            ]
+            },
+            "resize_size": [
+                128,
+                128
+            ],
+            "control_time_s": 20.0,
+            "use_gripper": false,
+            "gripper_quantization_threshold": null,
+            "gripper_penalty": -0.02,
+            "gripper_penalty_in_reward": false,
+            "fixed_reset_joint_positions": [
+                38.97,
+                -17.00,
+                49.50,
+                43.28,
+                5.15,
+                4.76
+            ],
+            "reset_time_s": 5.0,
+            "control_mode": "leader"
+        },
+        "name": "real_robot",
+        "mode": null,
+        "repo_id": "jpizarrom/hilserl_so100_push_v3_replay_buffer",
+        "dataset_root": null,
+        "task": "push",
+        "num_episodes": 0,
+        "episode": 0,
+        "pretrained_policy_name_or_path": null,
+        "device": "cuda",
+        "push_to_hub": false,
+        "fps": 10,
+        "features": {
+            "observation.images.top": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    128,
+                    128
+                ]
+            },
+            "observation.images.front": {
+                "type": "VISUAL",
+                "shape": [
+                    3,
+                    128,
+                    128
+                ]
+            },
+            "observation.state": {
+                "type": "STATE",
+                "shape": [
+                    21
+                ]
+            },
+            "action": {
+                "type": "ACTION",
+                "shape": [
+                    3
+                ]
+            }
+        },
+        "features_map": {
+            "observation.images.top": "observation.images.top",
+            "observation.images.front": "observation.images.front",
+            "observation.state": "observation.state",
+            "action": "action"
+        },
+        "reward_classifier_pretrained_path": "outputs/train/2025-06-15/09-42-58_reward-classifier/checkpoints/last/pretrained_model/"
+    }
+}

@@ -1,0 +1,134 @@
+{
+    "type": "gym_manipulator",
+    "robot": {
+        "type": "so100_follower_end_effector",
+        "port": "/dev/usb_follower_arm",
+        "id": "main_follower",
+        "cameras": {
+            "top": {
+                "type": "opencv",
+                "index_or_path": 6,
+                "height": 480,
+                "width": 640,
+                "fps": 30
+            },
+            "front": {
+                "type": "opencv",
+                "index_or_path": 8,
+                "height": 480,
+                "width": 640,
+                "fps": 30
+            }
+        },
+        "end_effector_bounds": {
+            "min": [
+                0.1874,
+                -0.2214,
+                0.0873
+            ],
+            "max": [
+                0.3879,
+                0.1854,
+                0.3361
+            ]
+        },
+        "end_effector_step_sizes": {
+            "x": 0.025,
+            "y": 0.025,
+            "z": 0.025
+        }
+    },
+    "teleop": {
+        "type": "so100_leader",
+        "port": "/dev/usb_leader_arm",
+        "id": "main_leader"
+    },
+    "wrapper": {
+        "display_cameras": true,
+        "add_joint_velocity_to_observation": true,
+        "add_current_to_observation": true,
+        "add_ee_pose_to_observation": true,
+        "crop_params_dict": {
+            "observation.images.top": [
+                79,
+                151,
+                237,
+                321
+            ],
+            "observation.images.front": [
+                269,
+                79,
+                196,
+                393
+            ]
+        },
+        "resize_size": [
+            128,
+            128
+        ],
+        "control_time_s": 20.0,
+        "use_gripper": false,
+        "gripper_quantization_threshold": null,
+        "gripper_penalty": -0.02,
+        "gripper_penalty_in_reward": false,
+        "fixed_reset_joint_positions": [
+            38.97,
+            -17.00,
+            49.50,
+            43.28,
+            5.15,
+            4.76
+        ],
+        "reset_time_s": 5.0,
+        "control_mode": "leader"
+    },
+    "name": "real_robot",
+    "mode": "record",
+    "repo_id": "jpizarrom/hilserl_so100_push_v3",
+    "dataset_root": null,
+    "task": "push the blue cilinder into the middle of the back square.",
+    "num_episodes": 40,
+    "episode": 0,
+    "pretrained_policy_name_or_path": null,
+    "device": "cpu",
+    "push_to_hub": false,
+    "fps": 10,
+    "number_of_steps_after_success": 15,
+    "features": {
+        "observation.images.top": {
+            "type": "VISUAL",
+            "shape": [
+                3,
+                128,
+                128
+            ]
+        },
+        "observation.images.front": {
+            "type": "VISUAL",
+            "shape": [
+                3,
+                128,
+                128
+            ]
+        },
+        "observation.state": {
+            "type": "STATE",
+            "shape": [
+                21
+            ]
+        },
+        "action": {
+            "type": "ACTION",
+            "shape": [
+                3
+            ]
+        }
+    },
+    "features_map": {
+        "observation.images.top": "observation.images.top",
+        "observation.images.front": "observation.images.front",
+        "observation.state": "observation.state",
+        "action": "action"
+    },
+    "reward_classifier_pretrained_path": null
+}

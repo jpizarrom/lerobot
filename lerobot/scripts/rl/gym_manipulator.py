@@ -60,7 +60,8 @@ from lerobot.common.teleoperators import (
     gamepad,  # noqa: F401
     keyboard,  # noqa: F401
     make_teleoperator_from_config,
-    so101_leader,  # noqa: F401
+    so101_leader,  # noqa: F401,
+    so100_leader,  # noqa: F401
 )
 from lerobot.common.teleoperators.gamepad.teleop_gamepad import GamepadTeleop
 from lerobot.common.teleoperators.keyboard.teleop_keyboard import KeyboardEndEffectorTeleop
@@ -287,7 +288,8 @@ class RobotEnv(gym.Env):
 
         # Define observation spaces for images and other states.
         if "pixels" in example_obs:
-            prefix = "observation.images" if len(example_obs["pixels"]) > 1 else "observation.image"
+            # prefix = "observation.images" if len(example_obs["pixels"]) > 1 else "observation.image"
+            prefix = "observation.images"
             observation_spaces = {
                 f"{prefix}.{key}": gym.spaces.Box(
                     low=0, high=255, shape=example_obs["pixels"][key].shape, dtype=np.uint8
@@ -572,6 +574,10 @@ class RewardWrapper(gym.Wrapper):
             )
         info["Reward classifier frequency"] = 1 / (time.perf_counter() - start_time)
 
+        # print(f"Reward classifier prediction took {info['Reward classifier frequency']:.2f} Hz")
+        print(f"Reward classifier prediction: {success}")
+
+ 
         reward = 0.0
         if success == 1.0:
             terminated = True
@@ -1341,6 +1347,9 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         # NOTE:
         obs, reward, terminated, truncated, info = self.env.step(action)
 
+        if isinstance(action, np.ndarray):
+            action = torch.from_numpy(action)
+
         # Add intervention info
         info["is_intervention"] = is_intervention
         info["action_intervention"] = action
@@ -2079,7 +2088,7 @@ def record_dataset(env, policy, cfg):
     while episode_index < cfg.num_episodes:
         obs, _ = env.reset()
         start_episode_t = time.perf_counter()
-        log_say(f"Recording episode {episode_index}", play_sounds=True)
+        log_say(f"Recording episode {episode_index}", play_sounds=True, blocking=True)
 
         # Track success state collection
         success_detected = False
@@ -2104,6 +2113,18 @@ def record_dataset(env, policy, cfg):
             recorded_action = {
                 "action": info["action_intervention"].cpu().squeeze(0).float() if policy is None else action
             }
+            # # For teleop, get action from intervention
+            # if policy is None:
+            #     action_intervention = info["action_intervention"]
+            #     if action_intervention is None:
+            #         action_tensor = None
+            #     if isinstance(action_intervention, np.ndarray):
+            #         action_tensor = torch.from_numpy(action_intervention).cpu().squeeze(0).float()
+            #     else:
+            #         action_tensor = action_intervention.cpu().squeeze(0).float()
+            #     recorded_action = {"action": action_tensor}
+            # else:
+            #     recorded_action = {"action": action}
 
             # Process observation for dataset
             obs_processed = {k: v.cpu().squeeze(0).float() for k, v in obs.items()}

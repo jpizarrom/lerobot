@@ -17,6 +17,7 @@
 from typing import TypedDict
 
 import torch
+import numpy as np
 
 
 class Transition(TypedDict):
@@ -39,6 +40,9 @@ def move_transition_to_device(transition: Transition, device: str = "cpu") -> Tr
     }
 
     # Move action to device
+    if isinstance(transition["action"], np.ndarray):
+        transition["action"] = torch.tensor(transition["action"])
+
     transition["action"] = transition["action"].to(device, non_blocking=non_blocking)
 
     # Move reward and done if they are tensors
