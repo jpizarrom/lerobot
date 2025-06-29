@@ -23,6 +23,7 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     SmolVLMForConditionalGeneration,
+    Gemma3nForConditionalGeneration,
 )
 
 
@@ -59,7 +60,7 @@ def get_intermediate_size(hidden_dim, ffn_dim_multiplier=4, multiple_of=256):
     return hidden_dim
 
 
-class SmolVLMWithExpertModel(nn.Module):
+class Gemma3nWithExpertModel(nn.Module):
     def __init__(
         self,
         model_id: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
@@ -84,18 +85,18 @@ class SmolVLMWithExpertModel(nn.Module):
             config = self.vlm.config
         else:
             config = AutoConfig.from_pretrained(model_id)
-            self.vlm = SmolVLMForConditionalGeneration(config=config)
+            self.vlm = Gemma3nForConditionalGeneration(config=config)
         self.processor = AutoProcessor.from_pretrained(model_id)
         if num_vlm_layers > 0:
             print(f"Reducing the number of VLM layers to {num_vlm_layers} ...")
-            self.get_vlm_model().text_model.layers = self.get_vlm_model().text_model.layers[:num_vlm_layers]
-        self.num_vlm_layers = len(self.get_vlm_model().text_model.layers)
+            self.get_vlm_model().language_model.layers = self.get_vlm_model().language_model.layers[:num_vlm_layers]
+        self.num_vlm_layers = len(self.get_vlm_model().language_model.layers)
         self.config = config
         # Smaller lm expert
         lm_expert_config = copy.deepcopy(config.text_config)
         hidden_size = lm_expert_config.hidden_size
         lm_expert_config.hidden_size = int(hidden_size * expert_width_multiplier)  # hidden_size // 2
-        lm_expert_config.intermediate_size = get_intermediate_size(int(hidden_size * expert_width_multiplier))
+        lm_expert_config.intermediate_size = [get_intermediate_size(int(hidden_size * expert_width_multiplier))]*self.num_vlm_layers
         lm_expert_config.num_hidden_layers = self.num_vlm_layers
         if num_expert_layers > 0:
             assert len(self.get_vlm_model().text_model.layers) % num_expert_layers == 0, (
@@ -138,8 +139,8 @@ class SmolVLMWithExpertModel(nn.Module):
 
     def set_requires_grad(self):
         if self.freeze_vision_encoder:
-            self.get_vlm_model().vision_model.eval()
-            for params in self.get_vlm_model().vision_model.parameters():
+            self.get_vlm_model().vision_tower.eval()
+            for params in self.get_vlm_model().vision_tower.parameters():
                 params.requires_grad = False
         if self.train_expert_only:
             self.vlm.eval()
@@ -172,28 +173,29 @@ class SmolVLMWithExpertModel(nn.Module):
         super().train(mode)
 
         if self.freeze_vision_encoder:
-            self.get_vlm_model().vision_model.eval()
+            self.get_vlm_model().vision_tower.eval()
 
         if self.train_expert_only:
             self.vlm.eval()
 
     def embed_image(self, image: torch.Tensor):
-        patch_attention_mask = None
+        # patch_attention_mask = None
         # Get sequence from the vision encoder
         image_hidden_states = (
             self.get_vlm_model()
-            .vision_model(
-                pixel_values=image.to(dtype=self.get_vlm_model().vision_model.dtype),
-                patch_attention_mask=patch_attention_mask,
+            .get_image_features(
+                pixel_values=image.to(dtype=self.get_vlm_model().vision_tower.dtype),
+                # patch_attention_mask=patch_attention_mask,
             )
-            .last_hidden_state
+            # .last_hidden_state
         )
         # Modality projection & resampling
-        image_hidden_states = self.get_vlm_model().connector(image_hidden_states)
+        # image_hidden_states = self.get_vlm_model().connector(image_hidden_states)
         return image_hidden_states
 
     def embed_language_tokens(self, tokens: torch.Tensor):
-        return self.get_vlm_model().text_model.get_input_embeddings()(tokens)
+        # return self.get_vlm_model().text_model.get_input_embeddings()(tokens)
+        return self.get_vlm_model().language_model.embed_tokens(tokens)
 
     def forward_attn_layer(
         self,
@@ -410,7 +412,7 @@ class SmolVLMWithExpertModel(nn.Module):
         use_cache: Optional[bool] = None,
         fill_kv_cache: Optional[bool] = None,
     ):
-        models = [self.get_vlm_model().text_model, self.lm_expert]
+        models = [self.get_vlm_model().language_model, self.lm_expert]
         model_layers = self.get_model_layers(models)
         for hidden_states in inputs_embeds:
             # TODO this is very inefficient

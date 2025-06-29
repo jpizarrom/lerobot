@@ -22,9 +22,9 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 
 
-@PreTrainedConfig.register_subclass("smolvla")
+@PreTrainedConfig.register_subclass("gemma3nvla")
 @dataclass
-class SmolVLAConfig(PreTrainedConfig):
+class Gemma3nVLAConfig(PreTrainedConfig):
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 50
@@ -43,7 +43,7 @@ class SmolVLAConfig(PreTrainedConfig):
     max_action_dim: int = 32
 
     # Image preprocessing
-    resize_imgs_with_padding: tuple[int, int] = (512, 512)
+    resize_imgs_with_padding: tuple[int, int] = (256, 256)
 
     # Add empty images. Used by smolvla_aloha_sim which adds the empty
     # left and right wrist cameras in addition to the top camera.

@@ -69,8 +69,8 @@ from lerobot.common.policies.normalize import (
     Unnormalize,
 )
 from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from lerobot.common.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
+from lerobot.common.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
+from lerobot.common.policies.gemma3nvla.gemma3n_with_expert import Gemma3nWithExpertModel
 from lerobot.common.policies.utils import (
     populate_queues,
 )
@@ -149,7 +149,7 @@ def load_smolvla(
     device: str = "cpu",
     checkpoint_keys_mapping: str = "",
 ) -> torch.nn.Module:
-    state_dict = safetensors.torch.load_file(filename, device=device)
+    state_dict = safetensors.torch.load_file(filename, device="cpu")
 
     # Optional user-supplied renames (e.g. "model._orig_mod.//model.")
     if checkpoint_keys_mapping and "//" in checkpoint_keys_mapping:
@@ -163,12 +163,12 @@ def load_smolvla(
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
-    if not all(key.startswith(norm_keys) for key in missing) or unexpected:
-        raise RuntimeError(
-            "SmolVLA %d missing / %d unexpected keys",
-            len(missing),
-            len(unexpected),
-        )
+    # if not all(key.startswith(norm_keys) for key in missing) or unexpected:
+    #     raise RuntimeError(
+    #         "SmolVLA %d missing / %d unexpected keys",
+    #         len(missing),
+    #         len(unexpected),
+    #     )
 
     return model
 
@@ -323,15 +323,15 @@ def aloha_gripper_from_angular_inv(value):
     return normalize(value, min_val=0.4, max_val=1.5)
 
 
-class SmolVLAPolicy(PreTrainedPolicy):
+class Gemma3nVLAPolicy(PreTrainedPolicy):
     """Wrapper class around VLAFlowMatching model to train and run inference within LeRobot."""
 
-    config_class = SmolVLAConfig
-    name = "smolvla"
+    config_class = Gemma3nVLAConfig
+    name = "gemma3nvla"
 
     def __init__(
         self,
-        config: SmolVLAConfig,
+        config: Gemma3nVLAConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
@@ -634,7 +634,7 @@ class VLAFlowMatching(nn.Module):
         super().__init__()
         self.config = config
 
-        self.vlm_with_expert = SmolVLMWithExpertModel(
+        self.vlm_with_expert = Gemma3nWithExpertModel(
             model_id=self.config.vlm_model_name,
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
@@ -659,14 +659,14 @@ class VLAFlowMatching(nn.Module):
         )
 
         self.set_requires_grad()
-        self.fake_image_token = self.vlm_with_expert.processor.tokenizer.fake_image_token_id
-        self.global_image_token = self.vlm_with_expert.processor.tokenizer.global_image_token_id
-        self.global_image_start_token = torch.tensor(
-            [self.fake_image_token, self.global_image_token], dtype=torch.long
-        )
+        # self.fake_image_token = self.vlm_with_expert.processor.tokenizer.fake_image_token_id
+        # self.global_image_token = self.vlm_with_expert.processor.tokenizer.global_image_token_id
+        # self.global_image_start_token = torch.tensor(
+        #     [self.fake_image_token, self.global_image_token], dtype=torch.long
+        # )
 
         self.add_image_special_tokens = self.config.add_image_special_tokens
-        self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
+        # self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
         self.prefix_length = self.config.prefix_length
 
     def set_requires_grad(self):
@@ -702,19 +702,20 @@ class VLAFlowMatching(nn.Module):
             img_mask,
         ) in enumerate(zip(images, img_masks, strict=False)):
             if self.add_image_special_tokens:
-                image_start_token = (
-                    self.vlm_with_expert.embed_language_tokens(
-                        self.global_image_start_token.to(device=self.vlm_with_expert.vlm.device)
-                    )
-                    .unsqueeze(0)
-                    .expand(img.shape[0], -1, -1)
-                )
-                image_start_mask = torch.ones_like(
-                    image_start_token[:, :, 0], dtype=torch.bool, device=image_start_token.device
-                )
-                att_masks += [0] * (image_start_mask.shape[-1])
-                embs.append(image_start_token)
-                pad_masks.append(image_start_mask)
+                raise
+                # image_start_token = (
+                #     self.vlm_with_expert.embed_language_tokens(
+                #         self.global_image_start_token.to(device=self.vlm_with_expert.vlm.device)
+                #     )
+                #     .unsqueeze(0)
+                #     .expand(img.shape[0], -1, -1)
+                # )
+                # image_start_mask = torch.ones_like(
+                #     image_start_token[:, :, 0], dtype=torch.bool, device=image_start_token.device
+                # )
+                # att_masks += [0] * (image_start_mask.shape[-1])
+                # embs.append(image_start_token)
+                # pad_masks.append(image_start_mask)
 
             img_emb = self.vlm_with_expert.embed_image(img)
             img_emb = img_emb
@@ -731,19 +732,20 @@ class VLAFlowMatching(nn.Module):
 
             att_masks += [0] * (num_img_embs)
             if self.add_image_special_tokens:
-                image_end_token = (
-                    self.vlm_with_expert.embed_language_tokens(
-                        self.image_end_token.to(device=self.vlm_with_expert.vlm.device)
-                    )
-                    .unsqueeze(0)
-                    .expand(img.shape[0], -1, -1)
-                )
-                image_end_mask = torch.ones_like(
-                    image_end_token[:, :, 0], dtype=torch.bool, device=image_end_token.device
-                )
-                embs.append(image_end_token)
-                pad_masks.append(image_end_mask)
-                att_masks += [0] * (image_end_mask.shape[1])
+                raise
+                # image_end_token = (
+                #     self.vlm_with_expert.embed_language_tokens(
+                #         self.image_end_token.to(device=self.vlm_with_expert.vlm.device)
+                #     )
+                #     .unsqueeze(0)
+                #     .expand(img.shape[0], -1, -1)
+                # )
+                # image_end_mask = torch.ones_like(
+                #     image_end_token[:, :, 0], dtype=torch.bool, device=image_end_token.device
+                # )
+                # embs.append(image_end_token)
+                # pad_masks.append(image_end_mask)
+                # att_masks += [0] * (image_end_mask.shape[1])
         lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
