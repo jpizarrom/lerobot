@@ -43,7 +43,7 @@ class Gemma3nVLAConfig(PreTrainedConfig):
     max_action_dim: int = 32
 
     # Image preprocessing
-    resize_imgs_with_padding: tuple[int, int] = (256, 256)
+    resize_imgs_with_padding: tuple[int, int] = (512, 512)
 
     # Add empty images. Used by smolvla_aloha_sim which adds the empty
     # left and right wrist cameras in addition to the top camera.

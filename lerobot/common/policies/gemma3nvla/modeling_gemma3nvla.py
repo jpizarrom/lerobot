@@ -169,6 +169,9 @@ def load_smolvla(
     #         len(missing),
     #         len(unexpected),
     #     )
+    
+    # release memory
+    del state_dict
 
     return model
 
@@ -367,12 +370,20 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
     @classmethod
     def _load_as_safetensor(
         cls,
-        model: "SmolVLAPolicy",
+        model: "Gemma3nVLAPolicy",
         model_file: str,
         map_location: str,
         strict: bool,
     ):
-        safetensors.torch.load_model(model, model_file, strict=strict, device=map_location)
+        # safetensors.torch.load_model(model, model_file, strict=strict, device=map_location)
+        # https://github.com/huggingface/transformers/blob/ccf2ca162e33f381e454cdb74bf4b41a51ab976d/src/transformers/trainer.py#L2853
+        # We load the model state dict on the CPU to avoid an OOM error.
+        state_dict = safetensors.torch.load_file(model_file, device="cpu")
+        load_result = model.load_state_dict(state_dict, strict=False)
+        # release memory
+        del state_dict
+        # logging.info(f"load_result {load_result}")
+
         return load_smolvla(
             model,
             model_file,
@@ -495,8 +506,8 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
             if self.config.resize_imgs_with_padding is not None:
                 img = resize_with_pad(img, *self.config.resize_imgs_with_padding, pad_value=0)
 
-            # Normalize from range [0,1] to [-1,1] as expacted by siglip
-            img = img * 2.0 - 1.0
+            # # Normalize from range [0,1] to [-1,1] as expacted by siglip
+            # img = img * 2.0 - 1.0
 
             bsize = img.shape[0]
             device = img.device
