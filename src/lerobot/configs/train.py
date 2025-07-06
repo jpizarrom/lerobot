@@ -37,6 +37,7 @@ class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     env: envs.EnvConfig | None = None
     policy: PreTrainedConfig | None = None
+    revision: str | None = None
     # Set `dir` to where you would like to save all of the run outputs. If you run another training session
     # with the same value for `dir` its contents will be overwritten unless you set `resume` to true.
     output_dir: Path | None = None
@@ -73,8 +74,9 @@ class TrainPipelineConfig(HubMixin):
         if policy_path:
             # Only load the policy config
             cli_overrides = parser.get_cli_overrides("policy")
-            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
+            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides, revision=self.revision)
             self.policy.pretrained_path = policy_path
+            self.policy.revision = self.revision
         elif self.resume:
             # The entire train config is already loaded, we just need to get the checkpoint dir
             config_path = parser.parse_arg("config_path")
@@ -107,8 +109,8 @@ class TrainPipelineConfig(HubMixin):
             train_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
             self.output_dir = Path("outputs/train") / train_dir
 
-        if isinstance(self.dataset.repo_id, list):
-            raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
+        # if isinstance(self.dataset.repo_id, list):
+        #     raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
 
         if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
             raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")

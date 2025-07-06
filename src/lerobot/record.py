@@ -134,6 +134,7 @@ class RecordConfig:
     teleop: TeleoperatorConfig | None = None
     # Whether to control the robot with a policy
     policy: PreTrainedConfig | None = None
+    revision: str | None = None
     # Display all cameras on screen
     display_data: bool = False
     # Use vocal synthesis to read events.
@@ -146,8 +147,9 @@ class RecordConfig:
         policy_path = parser.get_path_arg("policy")
         if policy_path:
             cli_overrides = parser.get_cli_overrides("policy")
-            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
+            self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides, revision=self.revision)
             self.policy.pretrained_path = policy_path
+            self.policy.revision = self.revision
 
         if self.teleop is None and self.policy is None:
             raise ValueError("Choose a policy, a teleoperator or both to control the robot")

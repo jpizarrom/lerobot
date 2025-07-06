@@ -172,6 +172,11 @@ def make_policy(
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time
         # hyperparameters that we want to vary).
         kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+        if hasattr(cfg, "revision") and cfg.revision is not None:
+            # If revision is set, we load the policy from a specific revision.
+            # This is useful for loading a specific version of a policy.
+            logging.info(f"Loading policy from revision {cfg.revision}.")
+            kwargs["revision"] = cfg.revision
         policy = policy_cls.from_pretrained(**kwargs)
     else:
         # Make a fresh policy.
