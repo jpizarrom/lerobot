@@ -124,6 +124,20 @@ class Gemma3nWithExpertModel(nn.Module):
                 )
         # Remove unused embed_tokens
         self.lm_expert.embed_tokens = None
+        self.lm_expert.embed_tokens_per_layer = None
+        self.lm_expert.per_layer_model_projection = None
+        self.lm_expert.per_layer_projection_norm = None
+        self.lm_expert.altup_projections = None
+        self.lm_expert.altup_unembed_projections = None
+
+        self.vlm.model.language_model.embed_tokens_per_layer = None
+        self.vlm.model.language_model.per_layer_model_projection = None
+        self.vlm.model.language_model.per_layer_projection_norm = None
+        self.vlm.model.language_model.altup_projections = None
+        self.vlm.model.language_model.altup_unembed_projections = None
+
+        self.vlm.model.audio_tower = None
+        self.vlm.model.embed_audio = None
 
         self.num_attention_heads = self.config.text_config.num_attention_heads
         self.num_key_value_heads = self.config.text_config.num_key_value_heads
