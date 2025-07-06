@@ -32,7 +32,7 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from lerobot.common.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
+from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 
@@ -76,7 +76,7 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
 
         return SmolVLAPolicy
     elif name == "gemma3nvla":
-        from lerobot.common.policies.gemma3nvla.modeling_gemma3nvla import Gemma3nVLAPolicy
+        from lerobot.policies.gemma3nvla.modeling_gemma3nvla import Gemma3nVLAPolicy
 
         return Gemma3nVLAPolicy
     else:
