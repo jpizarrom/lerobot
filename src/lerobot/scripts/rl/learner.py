@@ -71,7 +71,8 @@ from lerobot.constants import (
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
-from lerobot.policies.sac.modeling_sac import SACPolicy
+# from lerobot.policies.sac.modeling_sac import SACPolicy
+from lerobot.policies.fql.modeling_fql import FQLPolicy
 from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.scripts.rl import learner_service
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
@@ -313,7 +314,7 @@ def add_actor_information_and_train(
 
     logging.info("Initializing policy")
 
-    policy: SACPolicy = make_policy(
+    policy: FQLPolicy = make_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
@@ -523,37 +524,52 @@ def add_actor_information_and_train(
         # Actor and temperature optimization (at specified frequency)
         if optimization_step % policy_update_freq == 0:
             for _ in range(policy_update_freq):
-                # Actor optimization
-                actor_output = policy.forward(forward_batch, model="actor")
-                loss_actor = actor_output["loss_actor"]
-                optimizers["actor"].zero_grad()
-                loss_actor.backward()
-                actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value
+
+                # Actor BC flow optimization
+                actor_bc_flow_output = policy.forward(forward_batch, model="actor_bc_flow")
+                loss_actor_bc_flow = actor_bc_flow_output["loss_actor_bc_flow"]
+                optimizers["actor_bc_flow"].zero_grad()
+                loss_actor_bc_flow.backward()
+                actor_bc_flow_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=policy.actor_bc_flow.parameters(), max_norm=clip_grad_norm_value
                 ).item()
-                optimizers["actor"].step()
+                optimizers["actor_bc_flow"].step()
 
                 # Add actor info to training info
-                training_infos["loss_actor"] = loss_actor.item()
-                training_infos["actor_grad_norm"] = actor_grad_norm
+                training_infos["loss_actor_bc_flow"] = loss_actor_bc_flow.item()
+                training_infos["actor_bc_flow_grad_norm"] = actor_bc_flow_grad_norm
 
-                # Temperature optimization
-                temperature_output = policy.forward(forward_batch, model="temperature")
-                loss_temperature = temperature_output["loss_temperature"]
-                optimizers["temperature"].zero_grad()
-                loss_temperature.backward()
-                temp_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
+                # Actor onestep flow optimization
+                actor_onestep_flow_output = policy.forward(forward_batch, model="actor_onestep_flow")
+                loss_actor_onestep_flow = actor_onestep_flow_output["loss_actor_onestep_flow"]
+                optimizers["actor_onestep_flow"].zero_grad()
+                loss_actor_onestep_flow.backward()
+                actor_onestep_flow_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=policy.actor_onestep_flow.parameters(), max_norm=clip_grad_norm_value
                 ).item()
-                optimizers["temperature"].step()
+                optimizers["actor_onestep_flow"].step()
 
-                # Add temperature info to training info
-                training_infos["loss_temperature"] = loss_temperature.item()
-                training_infos["temperature_grad_norm"] = temp_grad_norm
-                training_infos["temperature"] = policy.temperature
+                # Add actor info to training info
+                training_infos["loss_actor_onestep_flow"] = loss_actor_onestep_flow.item()
+                training_infos["actor_onestep_flow_grad_norm"] = actor_onestep_flow_grad_norm
 
-                # Update temperature
-                policy.update_temperature()
+                # # Temperature optimization
+                # temperature_output = policy.forward(forward_batch, model="temperature")
+                # loss_temperature = temperature_output["loss_temperature"]
+                # optimizers["temperature"].zero_grad()
+                # loss_temperature.backward()
+                # temp_grad_norm = torch.nn.utils.clip_grad_norm_(
+                #     parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
+                # ).item()
+                # optimizers["temperature"].step()
+
+                # # Add temperature info to training info
+                # training_infos["loss_temperature"] = loss_temperature.item()
+                # training_infos["temperature_grad_norm"] = temp_grad_norm
+                # training_infos["temperature"] = policy.temperature
+
+                # # Update temperature
+                # policy.update_temperature()
 
         # Push policy to actors if needed
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
@@ -794,10 +810,18 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         - `lr_scheduler`: Currently set to `None` but can be extended to support learning rate scheduling.
 
     """
-    optimizer_actor = torch.optim.Adam(
+    optimizer_actor_bc_flow = torch.optim.Adam(
         params=[
             p
-            for n, p in policy.actor.named_parameters()
+            for n, p in policy.actor_bc_flow.named_parameters()
+            if not policy.config.shared_encoder or not n.startswith("encoder")
+        ],
+        lr=cfg.policy.actor_lr,
+    )
+    optimizer_actor_onestep_flow = torch.optim.Adam(
+        params=[
+            p
+            for n, p in policy.actor_onestep_flow.named_parameters()
             if not policy.config.shared_encoder or not n.startswith("encoder")
         ],
         lr=cfg.policy.actor_lr,
@@ -808,12 +832,13 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         optimizer_discrete_critic = torch.optim.Adam(
             params=policy.discrete_critic.parameters(), lr=cfg.policy.critic_lr
         )
-    optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
+    # optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
     lr_scheduler = None
     optimizers = {
-        "actor": optimizer_actor,
+        "actor_bc_flow": optimizer_actor_bc_flow,
+        "actor_onestep_flow": optimizer_actor_onestep_flow,
         "critic": optimizer_critic,
-        "temperature": optimizer_temperature,
+        # "temperature": optimizer_temperature,
     }
     if cfg.policy.num_discrete_actions is not None:
         optimizers["discrete_critic"] = optimizer_discrete_critic
@@ -1029,7 +1054,7 @@ def initialize_offline_replay_buffer(
 
 
 def get_observation_features(
-    policy: SACPolicy, observations: torch.Tensor, next_observations: torch.Tensor
+    policy: FQLPolicy, observations: torch.Tensor, next_observations: torch.Tensor
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """
     Get observation features from the policy encoder. It act as cache for the observation features.
@@ -1049,8 +1074,8 @@ def get_observation_features(
         return None, None
 
     with torch.no_grad():
-        observation_features = policy.actor.encoder.get_cached_image_features(observations, normalize=True)
-        next_observation_features = policy.actor.encoder.get_cached_image_features(
+        observation_features = policy.actor_onestep_flow.encoder.get_cached_image_features(observations, normalize=True)
+        next_observation_features = policy.actor_onestep_flow.encoder.get_cached_image_features(
             next_observations, normalize=True
         )
 
@@ -1111,7 +1136,7 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     logging.debug("[LEARNER] Pushing actor policy to the queue")
 
     # Create a dictionary to hold all the state dicts
-    state_dicts = {"policy": move_state_dict_to_device(policy.actor.state_dict(), device="cpu")}
+    state_dicts = {"policy": move_state_dict_to_device(policy.actor_onestep_flow.state_dict(), device="cpu")}
 
     # Add discrete critic if it exists
     if hasattr(policy, "discrete_critic") and policy.discrete_critic is not None:

@@ -60,20 +60,23 @@ class CriticNetworkConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
     activate_final: bool = True
     final_activation: str | None = None
+    layer_norm: bool = True
 
 
 @dataclass
 class ActorNetworkConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
-    activate_final: bool = True
+    activate_final: bool = False
+    layer_norm: bool = False
 
 
 @dataclass
 class PolicyConfig:
-    use_tanh_squash: bool = True
-    std_min: float = 1e-5
-    std_max: float = 10.0
-    init_final: float = 0.05
+    # use_tanh_squash: bool = True
+    # std_min: float = 1e-5
+    # std_max: float = 10.0
+    # init_final: float = 0.05
+    pass
 
 
 @PreTrainedConfig.register_subclass("fql")
@@ -169,6 +172,14 @@ class FQLConfig(PreTrainedConfig):
     temperature_lr: float = 3e-4
     # Weight for the critic target update
     critic_target_update_weight: float = 0.005
+    # Aggregation method for Q-values, can be "mean" or "max"
+    q_agg: str = "mean"
+    # Weight for the alpha parameter in the SAC algorithm
+    alpha: float = 10.0
+    # Number of steps for the flow in the SAC algorithm
+    flow_steps: int = 10
+    # Whether to normalize the Q-loss
+    normalize_q_loss: bool = False
     # Update-to-data ratio for the UTD algorithm (If you want enable utd_ratio, you need to set it to >1)
     utd_ratio: int = 1
     # Hidden dimension size for the state encoder

@@ -61,7 +61,8 @@ from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.policies.factory import make_policy
-from lerobot.policies.sac.modeling_sac import SACPolicy
+# from lerobot.policies.sac.modeling_sac import SACPolicy
+from lerobot.policies.fql.modeling_fql import FQLPolicy
 from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.scripts.rl import learner_service
 from lerobot.scripts.rl.gym_manipulator import make_robot_env
@@ -249,7 +250,7 @@ def act_with_policy(
     ### Instantiate the policy in both the actor and learner processes
     ### To avoid sending a SACPolicy object through the port, we create a policy instance
     ### on both sides, the learner sends the updated parameters every n steps to update the actor's parameters
-    policy: SACPolicy = make_policy(
+    policy: FQLPolicy = make_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
@@ -638,7 +639,7 @@ def interactions_stream(
 #################################################
 
 
-def update_policy_parameters(policy: SACPolicy, parameters_queue: Queue, device):
+def update_policy_parameters(policy: FQLPolicy, parameters_queue: Queue, device):
     bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
     if bytes_state_dict is not None:
         logging.info("[ACTOR] Load new parameters from Learner.")
@@ -656,7 +657,7 @@ def update_policy_parameters(policy: SACPolicy, parameters_queue: Queue, device)
 
         # Load actor state dict
         actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
-        policy.actor.load_state_dict(actor_state_dict)
+        policy.actor_onestep_flow.load_state_dict(actor_state_dict)
 
         # Load discrete critic if present
         if hasattr(policy, "discrete_critic") and "discrete_critic" in state_dicts:
