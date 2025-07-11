@@ -358,14 +358,16 @@ class FQLPolicy(
         # 4- Calculate loss
         # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
         td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
-        # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
-        critics_loss = (
-            F.mse_loss(
-                input=q_preds,
-                target=td_target_duplicate,
-                reduction="none",
-            ).mean(dim=1)
-        ).sum()
+        # # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
+        # critics_loss = (
+        #     F.mse_loss(
+        #         input=q_preds,
+        #         target=td_target_duplicate,
+        #         reduction="none",
+        #     ).mean(dim=1)
+        # ).sum()
+
+        critics_loss = F.mse_loss(input=q_preds, target=td_target_duplicate)
         
         return critics_loss
 
