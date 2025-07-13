@@ -93,6 +93,8 @@ class FQLVLAConfig(PreTrainedConfig):
     hyperparameters.
     """
 
+    chunk_size: int = 50
+
     # Mapping of feature types to normalization modes
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -245,11 +247,12 @@ class FQLVLAConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> list:
+        # return [0]
         return None
 
     @property
     def action_delta_indices(self) -> list:
-        return None  # SAC typically predicts one action at a time
+        return list(range(self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:

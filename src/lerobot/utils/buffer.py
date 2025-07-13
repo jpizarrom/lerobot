@@ -29,11 +29,13 @@ from lerobot.utils.transition import Transition
 class BatchTransition(TypedDict):
     state: dict[str, torch.Tensor]
     action: torch.Tensor
+    action_is_pad: torch.Tensor
     reward: torch.Tensor
     next_state: dict[str, torch.Tensor]
     done: torch.Tensor
     truncated: torch.Tensor
     complementary_info: dict[str, torch.Tensor | float | int] | None = None
+    
 
 
 def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Tensor:
@@ -131,12 +133,14 @@ class ReplayBuffer:
         self,
         state: dict[str, torch.Tensor],
         action: torch.Tensor,
+        action_is_pad: torch.Tensor,
         complementary_info: dict[str, torch.Tensor] | None = None,
     ):
         """Initialize the storage tensors based on the first transition."""
         # Determine shapes from the first transition
         state_shapes = {key: val.squeeze(0).shape for key, val in state.items()}
         action_shape = action.squeeze(0).shape
+        action_is_pad_shape = action_is_pad.squeeze(0).shape
 
         # Pre-allocate tensors for storage
         self.states = {
@@ -144,6 +148,7 @@ class ReplayBuffer:
             for key, shape in state_shapes.items()
         }
         self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
+        self.actions_is_pad = torch.empty((self.capacity, *action_is_pad_shape), dtype=torch.bool, device=self.storage_device)
         self.rewards = torch.empty((self.capacity,), device=self.storage_device)
 
         if not self.optimize_memory:
@@ -189,6 +194,7 @@ class ReplayBuffer:
         self,
         state: dict[str, torch.Tensor],
         action: torch.Tensor,
+        action_is_pad: torch.Tensor,
         reward: float,
         next_state: dict[str, torch.Tensor],
         done: bool,
@@ -198,7 +204,7 @@ class ReplayBuffer:
         """Saves a transition, ensuring tensors are stored on the designated storage device."""
         # Initialize storage if this is the first transition
         if not self.initialized:
-            self._initialize_storage(state=state, action=action, complementary_info=complementary_info)
+            self._initialize_storage(state=state, action=action, action_is_pad=action_is_pad, complementary_info=complementary_info)
 
         # Store the transition in pre-allocated tensors
         for key in self.states:
@@ -209,6 +215,7 @@ class ReplayBuffer:
                 self.next_states[key][self.position].copy_(next_state[key].squeeze(dim=0))
 
         self.actions[self.position].copy_(action.squeeze(dim=0))
+        self.actions_is_pad[self.position].copy_(action_is_pad.squeeze(dim=0))
         self.rewards[self.position] = reward
         self.dones[self.position] = done
         self.truncateds[self.position] = truncated
@@ -280,6 +287,7 @@ class ReplayBuffer:
 
         # Sample other tensors
         batch_actions = self.actions[idx].to(self.device)
+        batch_actions_is_pad = self.actions_is_pad[idx].to(self.device)
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
@@ -294,6 +302,7 @@ class ReplayBuffer:
         return BatchTransition(
             state=batch_state,
             action=batch_actions,
+            action_is_pad=batch_actions_is_pad,
             reward=batch_rewards,
             next_state=batch_next_state,
             done=batch_dones,
@@ -466,6 +475,7 @@ class ReplayBuffer:
             first_transition = list_transition[0]
             first_state = {k: v.to(device) for k, v in first_transition["state"].items()}
             first_action = first_transition["action"].to(device)
+            first_action_is_pad = first_transition["action_is_pad"].to(device)
 
             # Get complementary info if available
             first_complementary_info = None
@@ -478,7 +488,7 @@ class ReplayBuffer:
                 }
 
             replay_buffer._initialize_storage(
-                state=first_state, action=first_action, complementary_info=first_complementary_info
+                state=first_state, action=first_action, action_is_pad=first_action_is_pad, complementary_info=first_complementary_info
             )
 
         # Fill the buffer with all transitions
@@ -491,10 +501,12 @@ class ReplayBuffer:
                     data[k] = v.to(storage_device)
 
             action = data["action"]
+            action_is_pad =  data["action_is_pad"]
 
             replay_buffer.add(
                 state=data["state"],
                 action=action,
+                action_is_pad=action_is_pad,
                 reward=data["reward"],
                 next_state=data["next_state"],
                 done=data["done"],
@@ -677,6 +689,7 @@ class ReplayBuffer:
 
             # ----- 2) Action -----
             action = current_sample["action"].unsqueeze(0)  # Add batch dimension
+            action_is_pad = current_sample["action_is_pad"].unsqueeze(0)
 
             # ----- 3) Reward and done -----
             reward = float(current_sample["next.reward"].item())  # ensure float
@@ -731,6 +744,7 @@ class ReplayBuffer:
             transition = Transition(
                 state=current_state,
                 action=action,
+                action_is_pad=action_is_pad,
                 reward=reward,
                 next_state=next_state,
                 done=done,
@@ -798,6 +812,9 @@ def concatenate_batch_transitions(
     # Concatenate basic fields
     left_batch_transitions["action"] = torch.cat(
         [left_batch_transitions["action"], right_batch_transition["action"]], dim=0
+    )
+    left_batch_transitions["action_is_pad"] = torch.cat(
+        [left_batch_transitions["action_is_pad"], right_batch_transition["action_is_pad"]], dim=0
     )
     left_batch_transitions["reward"] = torch.cat(
         [left_batch_transitions["reward"], right_batch_transition["reward"]], dim=0

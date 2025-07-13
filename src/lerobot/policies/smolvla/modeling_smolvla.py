@@ -451,16 +451,20 @@ class SmolVLAPolicy(PreTrainedPolicy):
         if self.config.adapt_to_pi_aloha:
             batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
             batch[ACTION] = self._pi_aloha_encode_actions_inv(batch[ACTION])
+
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
         images, img_masks = self.prepare_images(batch)
         state = self.prepare_state(batch)
         lang_tokens, lang_masks = self.prepare_language(batch)
         actions = self.prepare_action(batch)
-        actions_is_pad = batch.get("actions_id_pad")
+        actions_is_pad = batch.get("actions_is_pad")
+
         loss_dict = {}
-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        losses, v_t = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
         loss_dict["losses_after_forward"] = losses.clone()
+
+        
 
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
@@ -469,13 +473,14 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
+        # losses[:, :, : 3].mean()
         loss_dict["losses_after_rm_padding"] = losses.clone()
 
         # For backward pass
         loss = losses.mean()
         # For backward pass
         loss_dict["loss"] = loss.item()
-        return loss, loss_dict
+        return loss, loss_dict, v_t
 
     def prepare_images(self, batch):
         """Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
@@ -829,7 +834,15 @@ class VLAFlowMatching(nn.Module):
     def forward(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
     ) -> Tensor:
-        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
+        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
+        Args:
+            images: List of image tensors (num_images x batch_size x channels x height x width
+            img_masks: List of image masks (num_images x batch_size)
+            lang_tokens: Language tokens (batch_size x num_lang_tokens)
+            lang_masks: Language masks (batch_size x num_lang_tokens)
+            state: State tensor (batch_size x max_state_dim)
+            actions: Actions tensor (batch_size x chunk_size x max_action_dim)
+        """
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
@@ -862,7 +875,8 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
-        return losses
+        # import pdb;pdb.set_trace()
+        return losses, v_t
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
@@ -915,7 +929,7 @@ class VLAFlowMatching(nn.Module):
         do_action_out_proj=True,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep,chunk_size=chunk_size)
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep, chunk_size=chunk_size)
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]

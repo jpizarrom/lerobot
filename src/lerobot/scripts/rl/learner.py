@@ -44,6 +44,7 @@ For more details on the complete HILSerl training workflow, see:
 https://github.com/michel-aractingi/lerobot-hilserl-guide
 """
 
+import einops
 import logging
 import os
 import shutil
@@ -198,9 +199,9 @@ def start_learner_threads(
         shutdown_event: Event to signal shutdown
     """
     # Create multiprocessing queues
-    transition_queue = Queue()
-    interaction_message_queue = Queue()
-    parameters_queue = Queue()
+    transition_queue = Queue(maxsize=1000)
+    interaction_message_queue = Queue(maxsize=1000)
+    parameters_queue = Queue(maxsize=1)
 
     concurrency_entity = None
 
@@ -406,16 +407,21 @@ def add_actor_information_and_train(
 
             if dataset_repo_id is not None:
                 batch_offline = next(offline_iterator)
+                # batch_offline["action_is_pad"]
+                # batch = batch_offline
                 batch = concatenate_batch_transitions(
                     left_batch_transitions=batch, right_batch_transition=batch_offline
                 )
+                # batch["action_is_pad"]
 
             actions = batch["action"]
             rewards = batch["reward"]
             observations = batch["state"]
             next_observations = batch["next_state"]
             done = batch["done"]
+            actions_is_pad = batch["action_is_pad"]
             check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
+            
 
             observation_features, next_observation_features = get_observation_features(
                 policy=policy, observations=observations, next_observations=next_observations
@@ -424,6 +430,9 @@ def add_actor_information_and_train(
             # Create a batch dictionary with all required elements for the forward method
             forward_batch = {
                 "action": actions,
+                "actions_is_pad": actions_is_pad,
+                # "actions_is_pad": torch.zeros_like(actions, dtype=torch.bool),
+                # "actions_is_pad": torch.zeros(*actions.shape[:-1], dtype=torch.bool, device=actions.device),
                 "reward": rewards,
                 "state": observations,
                 "next_state": next_observations,
@@ -464,6 +473,8 @@ def add_actor_information_and_train(
 
         if dataset_repo_id is not None:
             batch_offline = next(offline_iterator)
+            # batch_offline["action"]
+            # batch = batch_offline
             batch = concatenate_batch_transitions(
                 left_batch_transitions=batch, right_batch_transition=batch_offline
             )
@@ -473,6 +484,7 @@ def add_actor_information_and_train(
         observations = batch["state"]
         next_observations = batch["next_state"]
         done = batch["done"]
+        actions_is_pad = batch["action_is_pad"]
 
         check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
@@ -483,6 +495,9 @@ def add_actor_information_and_train(
         # Create a batch dictionary with all required elements for the forward method
         forward_batch = {
             "action": actions,
+            "actions_is_pad": actions_is_pad,
+            # "actions_is_pad": torch.zeros_like(actions, dtype=torch.bool),
+            # "actions_is_pad": torch.zeros(*actions.shape[:-1], dtype=torch.bool, device=actions.device),
             "reward": rewards,
             "state": observations,
             "next_state": next_observations,
@@ -553,6 +568,11 @@ def add_actor_information_and_train(
                 # Add actor info to training info
                 training_infos["loss_actor_onestep_flow"] = loss_actor_onestep_flow.item()
                 training_infos["actor_onestep_flow_grad_norm"] = actor_onestep_flow_grad_norm
+
+                for k in ["loss_actor_onestep_flow_distill", "loss_actor_onestep_flow_q_loss", "loss_actor_onestep_flow_q"]:
+                    # Add additional actor onestep flow info to training info
+                    if k in actor_onestep_flow_output:
+                        training_infos[k] = actor_onestep_flow_output[k].item()
 
                 # # Temperature optimization
                 # temperature_output = policy.forward(forward_batch, model="temperature")
@@ -1148,6 +1168,13 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
         )
         logging.debug("[LEARNER] Including discrete critic in state dict push")
 
+    # Add actor_bc_flow if it exists
+    if hasattr(policy, "actor_bc_flow") and policy.actor_bc_flow is not None:
+        state_dicts["actor_bc_flow"] = move_state_dict_to_device(
+            policy.actor_bc_flow.state_dict(), device="cpu"
+        )
+        logging.debug("[LEARNER] Including actor_bc_flow in state dict push")
+
     state_bytes = state_to_bytes(state_dicts)
     parameters_queue.put(state_bytes)
 
@@ -1200,6 +1227,19 @@ def process_transitions(
             ):
                 logging.warning("[LEARNER] NaN detected in transition, skipping")
                 continue
+
+            # # pad to [1, 50, 4]
+            action = transition["action"] # [1, 4]
+            # action  = action.unsqueeze(1) # [1, 1, 4]
+            # action = torch.cat([action, torch.zeros(action.shape[0], 49, action.shape[2], device=action.device)], dim=1)
+            action = einops.repeat(action, "b a -> b e a", e=50)
+            transition["action"] = action
+
+            
+            transition["action_is_pad"] = torch.cat([
+                torch.zeros(action.shape[0], 1, dtype=torch.bool,device=action.device),
+                torch.ones(action.shape[0], 49, dtype=torch.bool, device=action.device)
+            ], dim=1)
 
             replay_buffer.add(**transition)
 

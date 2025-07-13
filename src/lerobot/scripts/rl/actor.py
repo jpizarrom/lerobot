@@ -286,8 +286,11 @@ def act_with_policy(
 
         else:
             action = online_env.action_space.sample()
+            action = action.unsqueeze(0) # TODO: Handle batch chunking/batching
 
         next_obs, reward, done, truncated, info = online_env.step(action)
+        
+        # next_obs["observation.state"] = next_obs["observation.state"].unsqueeze(1)  # Add a batch dimension
 
         sum_reward_episode += float(reward)
         # Increment total steps counter for intervention rate
@@ -306,6 +309,7 @@ def act_with_policy(
             Transition(
                 state=obs,
                 action=action,
+                action_is_pad=torch.ones(*action.shape[:-1], dtype=torch.bool, device=action.device),
                 reward=reward,
                 next_state=next_obs,
                 done=done,
@@ -354,7 +358,9 @@ def act_with_policy(
             episode_intervention = False
             episode_intervention_steps = 0
             episode_total_steps = 0
+            policy.reset()  # Reset policy state if needed
             obs, info = online_env.reset()
+            
 
         if cfg.env.fps is not None:
             dt_time = time.perf_counter() - start_time
@@ -667,6 +673,14 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
             )
             policy.discrete_critic.load_state_dict(discrete_critic_state_dict)
             logging.info("[ACTOR] Loaded discrete critic parameters from Learner.")
+
+        # Load actor_bc_flow if present
+        if hasattr(policy, "actor_bc_flow") and "actor_bc_flow" in state_dicts:
+            actor_bc_flow_state_dict = move_state_dict_to_device(
+                state_dicts["actor_bc_flow"], device=device
+            )
+            policy.actor_bc_flow.load_state_dict(actor_bc_flow_state_dict)
+            logging.info("[ACTOR] Loaded actor_bc_flow parameters from Learner.")
 
 
 #################################################
