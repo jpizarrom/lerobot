@@ -504,6 +504,9 @@ def add_actor_information_and_train(
             "loss_critic": loss_critic.item(),
             "critic_grad_norm": critic_grad_norm,
         }
+        for k in critic_output:
+            if k not in ["loss_critic"]:
+                training_infos[f"critic_{k}"] = critic_output[k].item()
 
         # Discrete critic optimization (if available)
         if policy.config.num_discrete_actions is not None:
@@ -519,6 +522,10 @@ def add_actor_information_and_train(
             # Add discrete critic info to training info
             training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
             training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
+
+            for k in discrete_critic_output:
+                if k not in ["loss_discrete_critic"]:
+                    training_infos[f"discrete_critic_{k}"] = discrete_critic_output[k].item()
 
         # Actor and temperature optimization (at specified frequency)
         if optimization_step % policy_update_freq == 0:
@@ -536,6 +543,10 @@ def add_actor_information_and_train(
                 # Add actor info to training info
                 training_infos["loss_actor"] = loss_actor.item()
                 training_infos["actor_grad_norm"] = actor_grad_norm
+
+                for k in actor_output:
+                    if k not in ["loss_actor"]:
+                        training_infos[f"actor_{k}"] = actor_output[k].item()
 
                 # Temperature optimization
                 temperature_output = policy.forward(forward_batch, model="temperature")

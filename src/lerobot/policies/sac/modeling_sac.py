@@ -171,7 +171,7 @@ class SACPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
-            loss_critic = self.compute_loss_critic(
+            loss_critic, info = self.compute_loss_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -181,7 +181,7 @@ class SACPolicy(
                 next_observation_features=next_observation_features,
             )
 
-            return {"loss_critic": loss_critic}
+            return {"loss_critic": loss_critic, **info}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
             # Extract critic-specific components
@@ -190,7 +190,7 @@ class SACPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
             complementary_info = batch.get("complementary_info")
-            loss_discrete_critic = self.compute_loss_discrete_critic(
+            loss_discrete_critic, info = self.compute_loss_discrete_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -200,14 +200,13 @@ class SACPolicy(
                 next_observation_features=next_observation_features,
                 complementary_info=complementary_info,
             )
-            return {"loss_discrete_critic": loss_discrete_critic}
+            return {"loss_discrete_critic": loss_discrete_critic, **info}
         if model == "actor":
-            return {
-                "loss_actor": self.compute_loss_actor(
+            loss_actor, info = self.compute_loss_actor(
                     observations=observations,
                     observation_features=observation_features,
                 )
-            }
+            return {"loss_actor": loss_actor,  **info}
 
         if model == "temperature":
             return {
@@ -303,7 +302,12 @@ class SACPolicy(
                 reduction="none",
             ).mean(dim=1)
         ).sum()
-        return critics_loss
+        return critics_loss, {
+            # "critic_loss": critic_loss,
+            "predicted_qs": torch.mean(q_preds),
+            "target_qs": torch.mean(td_target_duplicate),
+            "rewards": rewards.mean(),
+        }
 
     def compute_loss_discrete_critic(
         self,
@@ -362,7 +366,14 @@ class SACPolicy(
 
         # Compute MSE loss between predicted and target Q-values
         discrete_critic_loss = F.mse_loss(input=predicted_discrete_q, target=target_discrete_q)
-        return discrete_critic_loss
+        
+        info = {
+            "predicted_qs": torch.mean(predicted_discrete_q),
+            "target_qs": torch.mean(target_discrete_q),
+            "rewards": rewards_discrete.mean(),
+        }
+        
+        return discrete_critic_loss, info
 
     def compute_loss_temperature(self, observations, observation_features: Tensor | None = None) -> Tensor:
         """Compute the temperature loss"""
@@ -388,7 +399,10 @@ class SACPolicy(
         min_q_preds = q_preds.min(dim=0)[0]
 
         actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
-        return actor_loss
+        return actor_loss, {
+            'q_loss': torch.mean(-min_q_preds),
+            "predicted_qs": torch.mean(q_preds),
+        }
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
