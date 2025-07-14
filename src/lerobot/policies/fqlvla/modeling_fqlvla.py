@@ -110,16 +110,16 @@ class FQLVLAPolicy(
             **batch,
         }
 
-        # actions = self.actor_bc_flow.encoder.vla.select_action(batch_with_task)
+        actions = self.actor_bc_flow.encoder.vla.select_action(batch_with_task)
         # actions = self.actor_onestep_flow.encoder.vla.select_action(batch_with_task)
         
-        _, _, actions = self.actor_onestep_flow(batch_with_task, observations_features)
-        # Unpad actions
-        original_action_dim = self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]
-        actions = actions[:, :, :original_action_dim]
-        actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actions})["action"]
+        # _, _, actions = self.actor_onestep_flow(batch_with_task, observations_features)
+        # # Unpad actions
+        # original_action_dim = self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]
+        # actions = actions[:, :, :original_action_dim]
+        # actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actions})["action"]
+        # actions = actions[:, 0, :]  # Use only the continuous action part
 
-        actions = actions[:, 0, :]  # Use only the continuous action part
         actions = torch.clamp(actions, -1.0, 1.0)
 
         if self.config.num_discrete_actions is not None:
@@ -255,10 +255,12 @@ class FQLVLAPolicy(
                 "loss_actor_bc_flow": loss_actor_bc_flow
             }
         if model == "actor_onestep_flow":
+            actions_is_pad = batch["actions_is_pad"]
             actor_onestep_flow_loss, distill_loss, q_loss, q = self.compute_loss_actor_onestep_flow(
                     observations=observations,
                     observation_features=observation_features,
                     actions=actions,
+                    actions_is_pad=actions_is_pad,
                 )
             return {
                 "loss_actor_onestep_flow": actor_onestep_flow_loss,
@@ -461,6 +463,7 @@ class FQLVLAPolicy(
         observations,
         observation_features: Tensor | None,
         actions: Tensor | None,
+        actions_is_pad: Tensor | None,
     ) -> Tensor:
         batch_size = actions.shape[0]
         action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
@@ -473,7 +476,11 @@ class FQLVLAPolicy(
         target_flow_actions, _, _ = self.actor_bc_flow.sample_actions(observations, observation_features, noises=noises)
         _, _, actor_actions  = self.actor_onestep_flow(observations, observation_features, noises)
 
-        distill_loss = F.mse_loss(input=actor_actions[:,:,:3], target=target_flow_actions[:,:,:3])
+        distill_losses = F.mse_loss(input=actor_actions[:,:,:], target=target_flow_actions[:,:,:], reduction="none")
+        in_episode_bound = ~actions_is_pad
+        distill_losses = distill_losses * in_episode_bound.unsqueeze(-1)
+        distill_losses = distill_losses[:, :, : self.actor_bc_flow.encoder.vla.config.max_action_dim]
+        distill_loss = distill_losses.mean()
 
         # Q loss.
         actor_actions = actor_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
