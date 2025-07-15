@@ -205,7 +205,7 @@ class FQLPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
-            loss_critic = self.compute_loss_critic(
+            loss_critic, info = self.compute_loss_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -215,7 +215,7 @@ class FQLPolicy(
                 next_observation_features=next_observation_features,
             )
 
-            return {"loss_critic": loss_critic}
+            return {"loss_critic": loss_critic, **info}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
             # Extract critic-specific components
@@ -224,7 +224,7 @@ class FQLPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
             complementary_info = batch.get("complementary_info")
-            loss_discrete_critic = self.compute_loss_discrete_critic(
+            loss_discrete_critic, info = self.compute_loss_discrete_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -234,7 +234,7 @@ class FQLPolicy(
                 next_observation_features=next_observation_features,
                 complementary_info=complementary_info,
             )
-            return {"loss_discrete_critic": loss_discrete_critic}
+            return {"loss_discrete_critic": loss_discrete_critic, **info}
         # if model == "actor":
         #     return {
         #         "loss_actor": self.compute_loss_actor(
@@ -244,21 +244,19 @@ class FQLPolicy(
         #         )
         #     }
         if model == "actor_bc_flow":
-            return {
-                "loss_actor_bc_flow": self.compute_loss_actor_bc_flow(
+            loss_actor_bc_flow, info = self.compute_loss_actor_bc_flow(
                     observations=observations,
                     observation_features=observation_features,
                     actions=actions,
                 )
-            }
+            return {"loss_actor_bc_flow": loss_actor_bc_flow, **info}
         if model == "actor_onestep_flow":
-            return {
-                "loss_actor_onestep_flow": self.compute_loss_actor_onestep_flow(
+            loss_actor_onestep_flow, info = self.compute_loss_actor_onestep_flow(
                     observations=observations,
                     observation_features=observation_features,
                     actions=actions,
                 )
-            }
+            return {"loss_actor_onestep_flow": loss_actor_onestep_flow, **info}
 
         # if model == "temperature":
         #     return {
@@ -368,8 +366,15 @@ class FQLPolicy(
         ).sum()
 
         # critics_loss = F.mse_loss(input=q_preds, target=td_target_duplicate)
+
+        info = {
+            # "critic_loss": critic_loss,
+            "predicted_qs": torch.mean(q_preds),
+            "target_qs": torch.mean(td_target_duplicate),
+            "rewards": rewards.mean(),
+        }
         
-        return critics_loss
+        return critics_loss, info
 
     def compute_loss_discrete_critic(
         self,
@@ -428,7 +433,14 @@ class FQLPolicy(
 
         # Compute MSE loss between predicted and target Q-values
         discrete_critic_loss = F.mse_loss(input=predicted_discrete_q, target=target_discrete_q)
-        return discrete_critic_loss
+
+        info = {
+            "predicted_qs": torch.mean(predicted_discrete_q),
+            "target_qs": torch.mean(target_discrete_q),
+            "rewards": rewards_discrete.mean(),
+        }
+
+        return discrete_critic_loss, info
 
     # def compute_loss_temperature(self, observations, observation_features: Tensor | None = None) -> Tensor:
     #     """Compute the temperature loss"""
@@ -457,7 +469,9 @@ class FQLPolicy(
         vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
         bc_flow_loss = F.mse_loss(input=vel_pred, target=vel)
 
-        return bc_flow_loss
+        info = {}
+
+        return bc_flow_loss, info
 
     def compute_loss_actor_onestep_flow(
         self,
@@ -492,53 +506,61 @@ class FQLPolicy(
 
         # actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
         actor_onestep_flow_loss = self.config.alpha * distill_loss + q_loss
-        return actor_onestep_flow_loss
 
-    def compute_loss_actor(
-        self,
-        observations,
-        observation_features: Tensor | None,
-        actions: Tensor | None,
-    ) -> Tensor:
-        batch_size = actions.shape[0]
-        action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+        info = {
+            "q_loss": q_loss,
+            "predicted_qs": torch.mean(q_preds),
+            "distill_loss": distill_loss,
+            "q": torch.mean(min_q_preds),
+        }
 
-        # BC flow loss.
-        x_0 = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
-        x_1 = actions[:, :-1] if self.config.num_discrete_actions is not None else actions
-        t = torch.rand(batch_size, 1, device=observations['observation.state'].device)
-        x_t = (1 - t) * x_0 + t * x_1
-        vel = x_1 - x_0
+        return actor_onestep_flow_loss, info
 
-        vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
-        bc_flow_loss = F.mse_loss(input=vel_pred, target=vel)
+    # def compute_loss_actor(
+    #     self,
+    #     observations,
+    #     observation_features: Tensor | None,
+    #     actions: Tensor | None,
+    # ) -> Tensor:
+    #     batch_size = actions.shape[0]
+    #     action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
 
-        # Distillation loss.        
-        noises = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
-        target_flow_actions = self.compute_flow_actions(observations, noises)
-        actor_actions, _, _ = self.actor_onestep_flow(observations, observation_features, noises)
-        distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
+    #     # BC flow loss.
+    #     x_0 = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
+    #     x_1 = actions[:, :-1] if self.config.num_discrete_actions is not None else actions
+    #     t = torch.rand(batch_size, 1, device=observations['observation.state'].device)
+    #     x_t = (1 - t) * x_0 + t * x_1
+    #     vel = x_1 - x_0
 
-        # Q loss.
-        actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
-        q_preds = self.critic_forward(
-            observations=observations,
-            actions=actor_actions,
-            use_target=False,
-            observation_features=observation_features,
-        )
-        # min_q_preds = q_preds.min(dim=0)[0]
-        min_q_preds = q_preds.mean(dim=0, keepdim=True)
-        q_loss = -min_q_preds.mean()
+    #     vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
+    #     bc_flow_loss = F.mse_loss(input=vel_pred, target=vel)
 
-        if self.config.normalize_q_loss:
-            # lam = 1.0 / q_preds.abs().mean().detach()
-            lam = 1.0 / (torch.abs(q_preds).mean().detach() + 1e-8)
-            q_loss = lam * q_loss
+    #     # Distillation loss.        
+    #     noises = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
+    #     target_flow_actions = self.compute_flow_actions(observations, noises)
+    #     actor_actions, _, _ = self.actor_onestep_flow(observations, observation_features, noises)
+    #     distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
 
-        # actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
-        actor_loss = bc_flow_loss + self.config.alpha * distill_loss + q_loss
-        return actor_loss
+    #     # Q loss.
+    #     actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+    #     q_preds = self.critic_forward(
+    #         observations=observations,
+    #         actions=actor_actions,
+    #         use_target=False,
+    #         observation_features=observation_features,
+    #     )
+    #     # min_q_preds = q_preds.min(dim=0)[0]
+    #     min_q_preds = q_preds.mean(dim=0, keepdim=True)
+    #     q_loss = -min_q_preds.mean()
+
+    #     if self.config.normalize_q_loss:
+    #         # lam = 1.0 / q_preds.abs().mean().detach()
+    #         lam = 1.0 / (torch.abs(q_preds).mean().detach() + 1e-8)
+    #         q_loss = lam * q_loss
+
+    #     # actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+    #     actor_loss = bc_flow_loss + self.config.alpha * distill_loss + q_loss
+    #     return actor_loss
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
@@ -846,9 +868,10 @@ class MLP(nn.Module):
         hidden_dims: list[int],
         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.GELU(),
         activate_final: bool = False,
-        dropout_rate: float | None = None,
+        # dropout_rate: float | None = None,
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
         layer_norm: bool = False,
+        default_init: float | None = None,
     ):
         super().__init__()
         layers: list[nn.Module] = []
@@ -858,6 +881,13 @@ class MLP(nn.Module):
         for idx, out_dim in enumerate(hidden_dims):
             # 1) linear transform
             layers.append(nn.Linear(in_dim, out_dim))
+
+            if default_init is not None:
+                nn.init.uniform_(layers[-1].weight, -default_init, default_init)
+                nn.init.uniform_(layers[-1].bias, -default_init, default_init)
+            else:
+                orthogonal_init()(layers[-1].weight)
+                nn.init.zeros_(layers[-1].bias)
 
             is_last = idx == total - 1
             # 2-4) optionally add dropout, normalization, and activation
@@ -886,7 +916,8 @@ class CriticHead(nn.Module):
         hidden_dims: list[int],
         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.GELU(),
         activate_final: bool = False,
-        dropout_rate: float | None = None,
+        # dropout_rate: float | None = None,
+        default_init: float | None = None,
         init_final: float | None = None,
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
         layer_norm: bool = False,
@@ -897,9 +928,10 @@ class CriticHead(nn.Module):
             hidden_dims=hidden_dims,
             activations=activations,
             activate_final=activate_final,
-            dropout_rate=dropout_rate,
+            # dropout_rate=dropout_rate,
             final_activation=final_activation,
             layer_norm=layer_norm,
+            default_init=default_init,
         )
         self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=1)
         if init_final is not None:
@@ -907,6 +939,7 @@ class CriticHead(nn.Module):
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
             orthogonal_init()(self.output_layer.weight)
+            nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.output_layer(self.net(x))
@@ -976,7 +1009,8 @@ class DiscreteCritic(nn.Module):
         output_dim: int = 3,
         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.GELU(),
         activate_final: bool = False,
-        dropout_rate: float | None = None,
+        # dropout_rate: float | None = None,
+        default_init: float | None = None,
         init_final: float | None = None,
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
         layer_norm: bool = False,
@@ -990,9 +1024,10 @@ class DiscreteCritic(nn.Module):
             hidden_dims=hidden_dims,
             activations=activations,
             activate_final=activate_final,
-            dropout_rate=dropout_rate,
+            # dropout_rate=dropout_rate,
             final_activation=final_activation,
             layer_norm=layer_norm,
+            default_init=default_init,
         )
 
         self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=self.output_dim)
@@ -1001,6 +1036,7 @@ class DiscreteCritic(nn.Module):
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
             orthogonal_init()(self.output_layer.weight)
+            nn.init.zeros_(self.output_layer.bias)
 
     def forward(
         self, observations: torch.Tensor, observation_features: torch.Tensor | None = None
@@ -1135,6 +1171,7 @@ class ActorVectorFieldPolicy(nn.Module):
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
             orthogonal_init()(self.output_layer.weight)
+            nn.init.zeros_(self.output_layer.bias)
 
     def forward(
         self,

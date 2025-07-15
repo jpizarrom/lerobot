@@ -61,14 +61,15 @@ class CriticNetworkConfig:
     activate_final: bool = True
     final_activation: str | None = None
     layer_norm: bool = True
-
+    default_init: float | None = None
+    init_final: float | None = None
 
 @dataclass
 class ActorNetworkConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
     activate_final: bool = False
     layer_norm: bool = False
-
+    default_init: float | None = None
 
 @dataclass
 class PolicyConfig:
@@ -76,7 +77,7 @@ class PolicyConfig:
     # std_min: float = 1e-5
     # std_max: float = 10.0
     # init_final: float = 0.05
-    pass
+    init_final: float | None = None
 
 
 @PreTrainedConfig.register_subclass("fql")
