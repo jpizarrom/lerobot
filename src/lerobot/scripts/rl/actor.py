@@ -665,6 +665,14 @@ def update_policy_parameters(policy: SACPolicy, parameters_queue: Queue, device)
             )
             policy.discrete_critic.load_state_dict(discrete_critic_state_dict)
             logging.info("[ACTOR] Loaded discrete critic parameters from Learner.")
+        
+        # Load discrete actor if present
+        if hasattr(policy, "discrete_actor") and "discrete_actor" in state_dicts:
+            discrete_actor_state_dict = move_state_dict_to_device(
+                state_dicts["discrete_actor"], device=device
+            )
+            policy.discrete_actor.load_state_dict(discrete_actor_state_dict)
+            logging.info("[ACTOR] Loaded discrete actor parameters from Learner.")
 
 
 #################################################
