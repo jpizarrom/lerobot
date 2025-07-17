@@ -30,10 +30,12 @@ def get_last_item_from_queue(queue: Queue, block=True, timeout: float = 0.1) -> 
         item = None
 
     # Drain queue and keep only the most recent parameters
-    try:
-        while True:
-            item = queue.get_nowait()
-    except Empty:
-        pass
+    while queue.qsize():
+        try:
+            while True:
+                item = queue.get_nowait()
+        except Empty:
+            pass
+    print(f"Queue size after draining: {queue.qsize()}")
 
     return item
