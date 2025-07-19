@@ -222,7 +222,7 @@ class FQLPolicy(
                 next_observation_features=next_observation_features,
             )
 
-            return {"loss_critic": loss_critic, **info}
+            return {"loss_critic": loss_critic, "info": info}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
             # Extract critic-specific components
@@ -241,7 +241,7 @@ class FQLPolicy(
                 next_observation_features=next_observation_features,
                 complementary_info=complementary_info,
             )
-            return {"loss_discrete_critic": loss_discrete_critic, **info}
+            return {"loss_discrete_critic": loss_discrete_critic, "info": info}
         # if model == "actor":
         #     return {
         #         "loss_actor": self.compute_loss_actor(
@@ -256,14 +256,14 @@ class FQLPolicy(
                     observation_features=observation_features,
                     actions=actions[:, 0],
                 )
-            return {"loss_actor_bc_flow": loss_actor_bc_flow, **info}
+            return {"loss_actor_bc_flow": loss_actor_bc_flow, "info": info}
         if model == "actor_onestep_flow":
             loss_actor_onestep_flow, info = self.compute_loss_actor_onestep_flow(
                     observations=observations,
                     observation_features=observation_features,
                     actions=actions[:, 0],
                 )
-            return {"loss_actor_onestep_flow": loss_actor_onestep_flow, **info}
+            return {"loss_actor_onestep_flow": loss_actor_onestep_flow, "info": info}
 
         if model == "discrete_actor":
             if self.config.num_discrete_actions is None:
@@ -273,7 +273,7 @@ class FQLPolicy(
                 observations=observations,
                 observation_features=observation_features,
             )
-            return {"loss_discrete_actor": loss_discrete_actor, **info}
+            return {"loss_discrete_actor": loss_discrete_actor, "info": info}
 
         if model == "temperature":
             return {
