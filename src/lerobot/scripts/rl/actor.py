@@ -310,9 +310,9 @@ def act_with_policy(
                 state=obs,
                 action=action,
                 action_is_pad=torch.ones(*action.shape[:-1], dtype=torch.bool, device=action.device),
-                reward=reward,
+                reward=torch.tensor([reward], dtype=torch.float32, device=action.device),
                 next_state=next_obs,
-                done=done,
+                done=torch.tensor([done], dtype=torch.bool, device=action.device),
                 truncated=truncated,  # TODO: (azouitine) Handle truncation properly
                 complementary_info=info,
             )
@@ -664,7 +664,7 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
 
         # Load actor state dict
         actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
-        policy.actor_onestep_flow.load_state_dict(actor_state_dict)
+        policy.actor_onestep_flow.load_state_dict(actor_state_dict, strict=False)
 
         # Load discrete critic if present
         if hasattr(policy, "discrete_critic") and "discrete_critic" in state_dicts:
@@ -679,7 +679,7 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
             actor_bc_flow_state_dict = move_state_dict_to_device(
                 state_dicts["actor_bc_flow"], device=device
             )
-            policy.actor_bc_flow.load_state_dict(actor_bc_flow_state_dict)
+            policy.actor_bc_flow.load_state_dict(actor_bc_flow_state_dict, strict=False)
             logging.info("[ACTOR] Loaded actor_bc_flow parameters from Learner.")
 
 

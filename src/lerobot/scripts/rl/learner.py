@@ -199,9 +199,9 @@ def start_learner_threads(
         shutdown_event: Event to signal shutdown
     """
     # Create multiprocessing queues
-    transition_queue = Queue(maxsize=1000)
-    interaction_message_queue = Queue(maxsize=1000)
-    parameters_queue = Queue(maxsize=1)
+    transition_queue = Queue()
+    interaction_message_queue = Queue()
+    parameters_queue = Queue()
 
     concurrency_entity = None
 
@@ -376,6 +376,7 @@ def add_actor_information_and_train(
             device=device,
             dataset_repo_id=dataset_repo_id,
             shutdown_event=shutdown_event,
+            chunk_size=cfg.policy.chunk_size,
         )
 
         # Process all available interaction messages sent by the actor server
@@ -522,6 +523,10 @@ def add_actor_information_and_train(
             "critic_grad_norm": critic_grad_norm,
         }
 
+        if "info" in critic_output:
+            for k,v in critic_output["info"].items():
+                training_infos[f"critic_{k}"] = v.item()
+
         # Discrete critic optimization (if available)
         if policy.config.num_discrete_actions is not None:
             discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
@@ -536,6 +541,10 @@ def add_actor_information_and_train(
             # Add discrete critic info to training info
             training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
             training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
+
+            if "info" in discrete_critic_output:
+                for k,v in discrete_critic_output["info"].items():
+                    training_infos[f"discrete_critic_{k}"] = v.item()
 
         # Actor and temperature optimization (at specified frequency)
         if optimization_step % policy_update_freq == 0:
@@ -555,6 +564,28 @@ def add_actor_information_and_train(
                 training_infos["loss_actor_bc_flow"] = loss_actor_bc_flow.item()
                 training_infos["actor_bc_flow_grad_norm"] = actor_bc_flow_grad_norm
 
+                if "info" in actor_bc_flow_output:
+                    for k,v in actor_bc_flow_output["info"].items():
+                        training_infos[f"actor_bc_flow_{k}"] = v.item()
+
+                # Actor optimization
+                discrete_actor_output = policy.forward(forward_batch, model="discrete_actor")
+                loss_discrete_actor = discrete_actor_output["loss_discrete_actor"]
+                optimizers["discrete_actor"].zero_grad()
+                loss_discrete_actor.backward()
+                discrete_actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=policy.discrete_actor.parameters(), max_norm=clip_grad_norm_value
+                ).item()
+                optimizers["discrete_actor"].step()
+
+                # Add actor info to training info
+                training_infos["loss_discrete_actor"] = loss_discrete_actor.item()
+                training_infos["discrete_actor_grad_norm"] = discrete_actor_grad_norm
+
+                if "info" in discrete_actor_output:
+                    for k,v in discrete_actor_output["info"].items():
+                        training_infos[f"discrete_actor_{k}"] = v.item()
+
                 # Actor onestep flow optimization
                 actor_onestep_flow_output = policy.forward(forward_batch, model="actor_onestep_flow")
                 loss_actor_onestep_flow = actor_onestep_flow_output["loss_actor_onestep_flow"]
@@ -569,28 +600,27 @@ def add_actor_information_and_train(
                 training_infos["loss_actor_onestep_flow"] = loss_actor_onestep_flow.item()
                 training_infos["actor_onestep_flow_grad_norm"] = actor_onestep_flow_grad_norm
 
-                for k in ["loss_actor_onestep_flow_distill", "loss_actor_onestep_flow_q_loss", "loss_actor_onestep_flow_q"]:
-                    # Add additional actor onestep flow info to training info
-                    if k in actor_onestep_flow_output:
-                        training_infos[k] = actor_onestep_flow_output[k].item()
+                if "info" in actor_onestep_flow_output:
+                    for k,v in actor_onestep_flow_output["info"].items():
+                        training_infos[f"actor_onestep_flow_{k}"] = v.item()
 
-                # # Temperature optimization
-                # temperature_output = policy.forward(forward_batch, model="temperature")
-                # loss_temperature = temperature_output["loss_temperature"]
-                # optimizers["temperature"].zero_grad()
-                # loss_temperature.backward()
-                # temp_grad_norm = torch.nn.utils.clip_grad_norm_(
-                #     parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
-                # ).item()
-                # optimizers["temperature"].step()
+                # Temperature optimization
+                temperature_output = policy.forward(forward_batch, model="temperature")
+                loss_temperature = temperature_output["loss_temperature"]
+                optimizers["temperature"].zero_grad()
+                loss_temperature.backward()
+                temp_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
+                ).item()
+                optimizers["temperature"].step()
 
-                # # Add temperature info to training info
-                # training_infos["loss_temperature"] = loss_temperature.item()
-                # training_infos["temperature_grad_norm"] = temp_grad_norm
-                # training_infos["temperature"] = policy.temperature
+                # Add temperature info to training info
+                training_infos["loss_temperature"] = loss_temperature.item()
+                training_infos["temperature_grad_norm"] = temp_grad_norm
+                training_infos["temperature"] = policy.temperature
 
-                # # Update temperature
-                # policy.update_temperature()
+                # Update temperature
+                policy.update_temperature()
 
         # Push policy to actors if needed
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
@@ -835,7 +865,7 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_bc_flow.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
+            if True or not n.startswith("encoder")
         ],
         lr=cfg.policy.actor_lr,
     )
@@ -843,7 +873,7 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_onestep_flow.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
+            if True or not n.startswith("encoder")
         ],
         lr=cfg.policy.actor_lr,
     )
@@ -853,16 +883,25 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         optimizer_discrete_critic = torch.optim.Adam(
             params=policy.discrete_critic.parameters(), lr=cfg.policy.critic_lr
         )
-    # optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
+        optimizer_discrete_actor = torch.optim.Adam(
+        params=[
+            p
+            for n, p in policy.discrete_actor.named_parameters()
+            if not policy.config.shared_encoder or not n.startswith("encoder")
+        ],
+        lr=cfg.policy.actor_lr,
+        )
+    optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
     lr_scheduler = None
     optimizers = {
         "actor_bc_flow": optimizer_actor_bc_flow,
         "actor_onestep_flow": optimizer_actor_onestep_flow,
         "critic": optimizer_critic,
-        # "temperature": optimizer_temperature,
+        "temperature": optimizer_temperature,
     }
     if cfg.policy.num_discrete_actions is not None:
         optimizers["discrete_critic"] = optimizer_discrete_critic
+        optimizers["discrete_actor"] = optimizer_discrete_actor
     return optimizers, lr_scheduler
 
 
@@ -1159,7 +1198,16 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     logging.debug("[LEARNER] Pushing actor policy to the queue")
 
     # Create a dictionary to hold all the state dicts
-    state_dicts = {"policy": move_state_dict_to_device(policy.actor_onestep_flow.state_dict(), device="cpu")}
+    state_dicts = {
+        "policy": move_state_dict_to_device(
+            {
+                k: v
+                for k, v in policy.actor_onestep_flow.state_dict().items()
+                if not any(k.startswith(p) for p in ("encoder.vla.model.vlm_with_expert.vlm.",))
+            },
+            device="cpu",
+        )
+    }
 
     # Add discrete critic if it exists
     if hasattr(policy, "discrete_critic") and policy.discrete_critic is not None:
@@ -1171,9 +1219,23 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     # Add actor_bc_flow if it exists
     if hasattr(policy, "actor_bc_flow") and policy.actor_bc_flow is not None:
         state_dicts["actor_bc_flow"] = move_state_dict_to_device(
-            policy.actor_bc_flow.state_dict(), device="cpu"
+            {
+                k: v
+                for k, v in policy.actor_bc_flow.state_dict().items()
+                if not any(
+                    k.startswith(p) for p in ("encoder.vla.model.vlm_with_expert.vlm.",)
+                )
+            },
+            device="cpu",
         )
         logging.debug("[LEARNER] Including actor_bc_flow in state dict push")
+
+    # Add discrete actor if it exists
+    if hasattr(policy, "discrete_actor") and policy.discrete_actor is not None:
+        state_dicts["discrete_actor"] = move_state_dict_to_device(
+            policy.discrete_actor.state_dict(), device="cpu"
+        )
+        logging.debug("[LEARNER] Including discrete actor in state dict push")
 
     state_bytes = state_to_bytes(state_dicts)
     parameters_queue.put(state_bytes)
@@ -1201,6 +1263,7 @@ def process_transitions(
     device: str,
     dataset_repo_id: str | None,
     shutdown_event: any,
+    chunk_size: int,
 ):
     """Process all available transitions from the queue.
 
@@ -1228,18 +1291,44 @@ def process_transitions(
                 logging.warning("[LEARNER] NaN detected in transition, skipping")
                 continue
 
-            # # pad to [1, 50, 4]
+            # pad to [1, 50, 4]
             action = transition["action"] # [1, 4]
-            # action  = action.unsqueeze(1) # [1, 1, 4]
-            # action = torch.cat([action, torch.zeros(action.shape[0], 49, action.shape[2], device=action.device)], dim=1)
-            action = einops.repeat(action, "b a -> b e a", e=50)
+            action = einops.repeat(action, "b a -> b e a", e=chunk_size)
             transition["action"] = action
 
-            
             transition["action_is_pad"] = torch.cat([
                 torch.zeros(action.shape[0], 1, dtype=torch.bool,device=action.device),
-                torch.ones(action.shape[0], 49, dtype=torch.bool, device=action.device)
+                torch.ones(action.shape[0], chunk_size-1, dtype=torch.bool, device=action.device)
             ], dim=1)
+
+            reward = transition["reward"]
+            reward = einops.repeat(reward, "b -> b e", e=chunk_size)
+            transition["reward"] = reward
+
+            done = transition["done"]
+            done = einops.repeat(done, "b -> b e", e=chunk_size)
+            transition["done"] = done
+
+            state = transition["state"]
+            # ['observation.images.front', 'observation.images.wrist', 'observation.state']
+            # Actual state and next chunk size is chunk_size+1
+            for k in state.keys():
+                if state[k].dim() == 2:
+                    # If the state is 2D, we need to repeat it to match the chunk size
+                    state[k] = einops.repeat(state[k], "b a -> b e a", e=chunk_size+1)
+                elif state[k].dim() == 3:
+                    # If the state is 3D, we need to repeat it to match the chunk size
+                    state[k] = einops.repeat(state[k], "b c h -> b e c h", e=chunk_size+1)
+                elif state[k].dim() == 4:
+                    # If the state is 4D, we need to repeat it to match the chunk size
+                    state[k] = einops.repeat(state[k], "b c h w -> b e c h w", e=chunk_size+1)
+                else:
+                    raise ValueError(
+                        f"Unsupported state dimension {state[k].dim()} for key {k}. Expected 2D or 3D tensor."
+                    )
+            transition["state"] = state
+
+            # import pdb; pdb.set_trace()
 
             replay_buffer.add(**transition)
 

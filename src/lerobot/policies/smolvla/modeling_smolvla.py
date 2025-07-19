@@ -62,6 +62,13 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 from transformers import AutoProcessor
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    SmolVLMForConditionalGeneration,
+)
 
 from lerobot.constants import ACTION, OBS_STATE
 from lerobot.policies.normalize import (
@@ -163,7 +170,7 @@ def load_smolvla(
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
-    if not all(key.startswith(norm_keys) for key in missing) or unexpected:
+    if not all(key.startswith(norm_keys) for key in missing) or not all(key.startswith(("model.vlm_with_expert.vlm",)) for key in unexpected) :
         raise RuntimeError(
             "SmolVLA %d missing / %d unexpected keys",
             len(missing),
@@ -333,6 +340,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self,
         config: SmolVLAConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+        vlm: SmolVLMForConditionalGeneration | None = None,
     ):
         """
         Args:
@@ -354,7 +362,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         )
 
         self.language_tokenizer = AutoProcessor.from_pretrained(self.config.vlm_model_name).tokenizer
-        self.model = VLAFlowMatching(config)
+        self.model = VLAFlowMatching(config, vlm=vlm)
         self.reset()
 
     def reset(self):
@@ -405,6 +413,28 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         return actions
 
+    def _get_action_chunk_onestep(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+        for k in batch:
+            if k in self._queues:
+                batch[k] = torch.stack(list(self._queues[k]), dim=1)
+
+        images, img_masks = self.prepare_images(batch)
+        state = self.prepare_state(batch)
+        lang_tokens, lang_masks = self.prepare_language(batch)
+
+        actions = self.model.sample_actions_onestep(images, img_masks, lang_tokens, lang_masks, state, noise=noise)
+
+        # Unpad actions
+        original_action_dim = self.config.action_feature.shape[0]
+        actions = actions[:, :, :original_action_dim]
+
+        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
+
+        if self.config.adapt_to_pi_aloha:
+            actions = self._pi_aloha_encode_actions(actions)
+
+        return actions
+
     def _prepare_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         if self.config.adapt_to_pi_aloha:
             batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
@@ -439,6 +469,29 @@ class SmolVLAPolicy(PreTrainedPolicy):
         # querying the policy.
         if len(self._queues[ACTION]) == 0:
             actions = self._get_action_chunk(batch, noise)
+
+            # `self.predict_action_chunk` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
+            # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
+            self._queues[ACTION].extend(actions.transpose(0, 1)[: self.config.n_action_steps])
+
+        return self._queues[ACTION].popleft()
+
+    @torch.no_grad()
+    def select_action_onestep(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+        """Select a single action given environment observations.
+
+        This method wraps `select_actions` in order to return one action at a time for execution in the
+        environment. It works by managing the actions in a queue and only calling `select_actions` when the
+        queue is empty.
+        """
+        self.eval()
+        batch = self._prepare_batch(batch)
+        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+
+        # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
+        # querying the policy.
+        if len(self._queues[ACTION]) == 0:
+            actions = self._get_action_chunk_onestep(batch, noise)
 
             # `self.predict_action_chunk` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
@@ -636,7 +689,7 @@ class VLAFlowMatching(nn.Module):
     └──────────────────────────────┘
     """
 
-    def __init__(self, config):
+    def __init__(self, config, vlm: SmolVLMForConditionalGeneration | None = None):
         super().__init__()
         self.config = config
 
@@ -650,6 +703,7 @@ class VLAFlowMatching(nn.Module):
             num_vlm_layers=self.config.num_vlm_layers,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
+            vlm=vlm,
         )
         self.state_proj = nn.Linear(
             self.config.max_state_dim, self.vlm_with_expert.config.text_config.hidden_size
@@ -958,3 +1012,74 @@ class VLAFlowMatching(nn.Module):
         else:
             v_t = suffix_out
         return v_t
+
+    def sample_actions_onestep(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
+        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        bsize = state.shape[0]
+        device = state.device
+
+        if noise is None:
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+            noise = self.sample_noise(actions_shape, device)
+        
+        time = self.sample_time(noise.shape[0], noise.device)
+        
+        x_t = noise
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        (_, suffix_out), _ = self.vlm_with_expert.forward(
+            attention_mask=att_2d_masks,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            use_cache=False,
+            fill_kv_cache=False,
+        )
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        # Original openpi code, upcast attention output
+        suffix_out = suffix_out.to(dtype=torch.float32)
+        v_t = self.action_out_proj(suffix_out)
+        # losses = F.mse_loss(u_t, v_t, reduction="none")
+        # import pdb;pdb.set_trace()
+        return v_t
+
+        # prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+        #     images, img_masks, lang_tokens, lang_masks, state=state
+        # )
+        # prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        # prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        # # Compute image and language key value cache
+        # _, past_key_values = self.vlm_with_expert.forward(
+        #     attention_mask=prefix_att_2d_masks,
+        #     position_ids=prefix_position_ids,
+        #     past_key_values=None,
+        #     inputs_embeds=[prefix_embs, None],
+        #     use_cache=self.config.use_cache,
+        #     fill_kv_cache=True,
+        # )
+        # dt = -1.0 / self.config.num_steps
+        # dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        # x_t = noise
+        # time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        # while time >= -dt / 2:
+        #     expanded_time = time.expand(bsize)
+        #     v_t = self.denoise_step(
+        #         prefix_pad_masks,
+        #         past_key_values,
+        #         x_t,
+        #         expanded_time,
+        #     )
+        #     # Euler step
+        #     x_t += dt * v_t
+        #     time += dt
+        # return x_t

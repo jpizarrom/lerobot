@@ -61,14 +61,15 @@ class CriticNetworkConfig:
     activate_final: bool = True
     final_activation: str | None = None
     layer_norm: bool = True
-
+    default_init: float | None = None
+    init_final: float | None = None
 
 @dataclass
 class ActorNetworkConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
     activate_final: bool = False
     layer_norm: bool = False
-
+    default_init: float | None = None
 
 @dataclass
 class PolicyConfig:
@@ -76,7 +77,19 @@ class PolicyConfig:
     # std_min: float = 1e-5
     # std_max: float = 10.0
     # init_final: float = 0.05
-    pass
+    init_final: float | None = None
+
+@dataclass
+class DiscreteActorNetworkConfig:
+    """Configuration for the discrete actor network."""
+    hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
+    activate_final: bool = True
+    layer_norm: bool = False
+
+@dataclass
+class DiscretePolicyConfig:
+    """Configuration for the discrete policy."""
+    init_final: float | None = None
 
 
 @PreTrainedConfig.register_subclass("fqlvla")
@@ -200,8 +213,12 @@ class FQLVLAConfig(PreTrainedConfig):
     critic_network_kwargs: CriticNetworkConfig = field(default_factory=CriticNetworkConfig)
     # Configuration for the actor network architecture
     actor_network_kwargs: ActorNetworkConfig = field(default_factory=ActorNetworkConfig)
+    # Configuration for the discrete actor network architecture
+    discrete_actor_network_kwargs: DiscreteActorNetworkConfig = field(default_factory=DiscreteActorNetworkConfig)
     # Configuration for the policy parameters
     policy_kwargs: PolicyConfig = field(default_factory=PolicyConfig)
+    # Configuration for the discrete policy
+    discrete_policy_kwargs: DiscretePolicyConfig = field(default_factory=DiscretePolicyConfig)
     # Configuration for the discrete critic network
     discrete_critic_network_kwargs: CriticNetworkConfig = field(default_factory=CriticNetworkConfig)
     # Configuration for actor-learner architecture
@@ -247,8 +264,9 @@ class FQLVLAConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> list:
+        return list(range(self.chunk_size + 1))
         # return [0]
-        return None
+        # return None
 
     @property
     def action_delta_indices(self) -> list:
@@ -256,4 +274,9 @@ class FQLVLAConfig(PreTrainedConfig):
 
     @property
     def reward_delta_indices(self) -> None:
-        return None
+        return list(range(self.chunk_size))
+
+    @property
+    def done_delta_indices(self) -> list:
+        return list(range(self.chunk_size))
+        # return None
