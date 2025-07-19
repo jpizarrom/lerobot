@@ -287,6 +287,7 @@ class ReplayBuffer:
         batch_rewards_nsteps = n_step_returns.to(self.device)
         batch_discounts_nsteps = target_q_discounts.to(self.device)
         batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
+        # batch_dones_nsteps = torch.logical_or(self.dones[last_indices], self.truncateds[last_indices]).to(self.device).float()
         batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
 
         # For each sampled index, select the action at idx and mask out actions after done/truncation
@@ -374,6 +375,7 @@ class ReplayBuffer:
         # batch_actions = self.actions[idx].to(self.device)
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
+        # batch_dones = torch.logical_or(self.dones[idx], self.truncateds[idx]).to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
 
         # Sample complementary_info if available

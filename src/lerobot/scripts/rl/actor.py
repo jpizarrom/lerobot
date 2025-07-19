@@ -289,8 +289,6 @@ def act_with_policy(
             # action = action.unsqueeze(0) # TODO: Handle batch chunking/batching
 
         next_obs, reward, done, truncated, info = online_env.step(action)
-
-        print(done, truncated)
         
         # next_obs["observation.state"] = next_obs["observation.state"].unsqueeze(1)  # Add a batch dimension
 
@@ -323,6 +321,7 @@ def act_with_policy(
 
         if done or truncated:
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
+            print(done, truncated)
 
             update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
 

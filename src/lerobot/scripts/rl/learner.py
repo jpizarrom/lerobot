@@ -376,7 +376,7 @@ def add_actor_information_and_train(
             device=device,
             dataset_repo_id=dataset_repo_id,
             shutdown_event=shutdown_event,
-            chunk_size=cfg.policy.chunk_size,
+            # chunk_size=cfg.policy.chunk_size,
         )
 
         # Process all available interaction messages sent by the actor server
@@ -388,8 +388,8 @@ def add_actor_information_and_train(
         )
 
         # Wait until the replay buffer has enough samples to start training
-        # if len(replay_buffer) < online_step_before_learning:
-        #     continue
+        if len(replay_buffer) < online_step_before_learning:
+            continue
 
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
@@ -404,15 +404,15 @@ def add_actor_information_and_train(
         time_for_one_optimization_step = time.time()
         for _ in range(utd_ratio - 1):
             # Sample from the iterators
-            # batch = next(online_iterator)
+            batch = next(online_iterator)
 
             if dataset_repo_id is not None:
                 batch_offline = next(offline_iterator)
                 # batch_offline["action_is_pad"]
-                batch = batch_offline
-                # batch = concatenate_batch_transitions(
-                #     left_batch_transitions=batch, right_batch_transition=batch_offline
-                # )
+                # batch = batch_offline
+                batch = concatenate_batch_transitions(
+                    left_batch_transitions=batch, right_batch_transition=batch_offline
+                )
                 # batch["action_is_pad"]
 
             actions = batch["action"]
@@ -482,15 +482,15 @@ def add_actor_information_and_train(
             policy.update_target_networks()
 
         # Sample for the last update in the UTD ratio
-        # batch = next(online_iterator)
+        batch = next(online_iterator)
 
         if dataset_repo_id is not None:
             batch_offline = next(offline_iterator)
             # batch_offline["action"]
-            batch = batch_offline
-            # batch = concatenate_batch_transitions(
-            #     left_batch_transitions=batch, right_batch_transition=batch_offline
-            # )
+            # batch = batch_offline
+            batch = concatenate_batch_transitions(
+                left_batch_transitions=batch, right_batch_transition=batch_offline
+            )
 
         actions = batch["action"]
         rewards = batch["reward"]
@@ -1287,7 +1287,7 @@ def process_transitions(
     device: str,
     dataset_repo_id: str | None,
     shutdown_event: any,
-    chunk_size: int,
+    # chunk_size: int,
 ):
     """Process all available transitions from the queue.
 
