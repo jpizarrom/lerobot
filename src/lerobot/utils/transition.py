@@ -41,7 +41,7 @@ def move_transition_to_device(transition: Transition, device: str = "cpu") -> Tr
 
     # Move action to device
     transition["action"] = transition["action"].to(device, non_blocking=non_blocking)
-    transition["action_is_pad"] = transition["action_is_pad"].to(device, non_blocking=non_blocking)
+    # transition["action_is_pad"] = transition["action_is_pad"].to(device, non_blocking=non_blocking)
 
     # Move reward and done if they are tensors
     if isinstance(transition["reward"], torch.Tensor):

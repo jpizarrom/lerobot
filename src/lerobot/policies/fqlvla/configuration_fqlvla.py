@@ -264,19 +264,19 @@ class FQLVLAConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> list:
-        return list(range(self.chunk_size + 1))
+        # return list(range(self.chunk_size + 1))
         # return [0]
-        # return None
+        return None
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size))
+        return None
 
     @property
     def reward_delta_indices(self) -> None:
-        return list(range(self.chunk_size))
+        return None
 
-    @property
-    def done_delta_indices(self) -> list:
-        return list(range(self.chunk_size))
-        # return None
+    # @property
+    # def done_delta_indices(self) -> list:
+    #     return list(range(self.chunk_size))
+    #     # return None

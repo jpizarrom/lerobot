@@ -286,9 +286,11 @@ def act_with_policy(
 
         else:
             action = online_env.action_space.sample()
-            action = action.unsqueeze(0) # TODO: Handle batch chunking/batching
+            # action = action.unsqueeze(0) # TODO: Handle batch chunking/batching
 
         next_obs, reward, done, truncated, info = online_env.step(action)
+
+        print(done, truncated)
         
         # next_obs["observation.state"] = next_obs["observation.state"].unsqueeze(1)  # Add a batch dimension
 
@@ -309,10 +311,9 @@ def act_with_policy(
             Transition(
                 state=obs,
                 action=action,
-                action_is_pad=torch.ones(*action.shape[:-1], dtype=torch.bool, device=action.device),
-                reward=torch.tensor([reward], dtype=torch.float32, device=action.device),
+                reward=reward,
                 next_state=next_obs,
-                done=torch.tensor([done], dtype=torch.bool, device=action.device),
+                done=done,
                 truncated=truncated,  # TODO: (azouitine) Handle truncation properly
                 complementary_info=info,
             )

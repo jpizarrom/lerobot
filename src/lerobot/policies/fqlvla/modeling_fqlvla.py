@@ -216,9 +216,10 @@ class FQLVLAPolicy(
 
         if model == "critic":
             # Extract critic-specific components
-            rewards: Tensor = batch["reward"]
-            next_observations: dict[str, Tensor] = batch["next_state"]
-            done: Tensor = batch["done"]
+            rewards: Tensor = batch["reward_nsteps"]
+            discounts: Tensor = batch["discount_nsteps"]
+            next_observations: dict[str, Tensor] = batch["next_state_nsteps"]
+            done: Tensor = batch["done_nsteps"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
             loss_critic, info = self.compute_loss_critic(
@@ -226,6 +227,7 @@ class FQLVLAPolicy(
                 actions=actions,
                 actions_is_pad=actions_is_pad,
                 rewards=rewards,
+                discounts=discounts,
                 next_observations=next_observations,
                 done=done,
                 observation_features=observation_features,
@@ -344,6 +346,7 @@ class FQLVLAPolicy(
         actions,
         actions_is_pad: Tensor,
         rewards,
+        discounts,
         next_observations,
         done,
         observation_features: Tensor | None = None,
@@ -363,10 +366,11 @@ class FQLVLAPolicy(
                 next_actions.shape[0], -1
             ) # [32, 150]
 
-            last_next_observations = {key: val[:, -1] for key, val in next_observations.items()}
+            # last_next_observations = {key: val[:, -1] for key, val in next_observations.items()}
+
             # 2- compute q targets
             next_qs = self.critic_forward(
-                observations=last_next_observations,
+                observations=next_observations,
                 actions=next_actions,
                 use_target=True,
                 observation_features=next_observation_features,
@@ -389,19 +393,21 @@ class FQLVLAPolicy(
             #     min_q = min_q - (self.temperature * next_log_probs)
             # import pdb;pdb.set_trace()
 
-            # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
-            done_idx = done.argmax(axis=1)
-            has_done = done.any(axis=1)
-            done_idx = torch.where(has_done, done_idx, torch.tensor(self.config.chunk_size - 1, device=done.device))
+            # # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
+            # done_idx = done.argmax(axis=1)
+            # has_done = done.any(axis=1)
+            # done_idx = torch.where(has_done, done_idx, torch.tensor(self.config.chunk_size - 1, device=done.device))
             
-            mask = torch.arange(self.config.chunk_size, device=done.device).reshape(1, -1) <= done_idx[:, None] # shape: [batch, n_steps]
-            target_q_discounts = self.config.discount ** mask.sum(axis=1, keepdims=True) # [batch, 1]
+            # mask = torch.arange(self.config.chunk_size, device=done.device).reshape(1, -1) <= done_idx[:, None] # shape: [batch, n_steps]
+            # target_q_discounts = self.config.discount ** mask.sum(axis=1, keepdims=True) # [batch, 1]
             
-            discounts = self.config.discount ** torch.arange(self.config.chunk_size, dtype=torch.float, device=rewards.device).reshape(1, -1) # [1, n_steps]
-            discounted_rewards = rewards * discounts * mask
-            n_step_returns = discounted_rewards.sum(axis=1, keepdims=True) # [batch, 1]
+            # discounts = self.config.discount ** torch.arange(self.config.chunk_size, dtype=torch.float, device=rewards.device).reshape(1, -1) # [1, n_steps]
+            # discounted_rewards = rewards * discounts * mask
+            # n_step_returns = discounted_rewards.sum(axis=1, keepdims=True) # [batch, 1]
             
-            td_target = n_step_returns.squeeze(-1) + (1 - has_done.float()) * target_q_discounts.squeeze(-1) * next_q
+            # td_target = n_step_returns.squeeze(-1) + (1 - has_done.float()) * target_q_discounts.squeeze(-1) * next_q
+            td_target = rewards.squeeze(-1) + (1 - done) * discounts.squeeze(-1) * next_q
+            # td_target = rewards.squeeze(-1) + (1 - done) * self.config.discount * next_q
 
         # 3- compute predicted qs
         if self.config.num_discrete_actions is not None:
@@ -469,10 +475,10 @@ class FQLVLAPolicy(
         actions_discrete = actions_discrete.long()
 
         with torch.no_grad():
-            last_next_observations = {key: val[:, -1] for key, val in next_observations.items()}
+            # last_next_observations = {key: val[:, -1] for key, val in next_observations.items()}
             # action, log_prob, action_probs
             _, next_log_probs, next_action_probs = self.discrete_actor(
-                last_next_observations, next_observation_features
+                next_observations, next_observation_features
             )
             # next_action_preds [228]
             # next_state_action_probs [228, 3]
@@ -480,7 +486,7 @@ class FQLVLAPolicy(
 
             # Get target Q-values from target network
             target_next_discrete_qs = self.discrete_critic_forward(
-                observations=last_next_observations,
+                observations=next_observations,
                 # actions=next_action_preds,
                 use_target=True,
                 observation_features=next_observation_features,
@@ -509,10 +515,15 @@ class FQLVLAPolicy(
             rewards_discrete = rewards
             # if discrete_penalties is not None:
             #     rewards_discrete = rewards + discrete_penalties
-            target_discrete_q = (
-                rewards_discrete[:, 0]
-                + (1 - done[:, 0]) * self.config.discount * target_next_discrete_q
-            )
+            # target_discrete_q = (
+            #     rewards_discrete[:, 0]
+            #     + (1 - done[:, 0]) * self.config.discount * target_next_discrete_q
+            # )
+            # Compute target Q-value with Bellman equation
+            rewards_discrete = rewards
+            # if discrete_penalties is not None:
+            #     rewards_discrete = rewards + discrete_penalties
+            target_discrete_q = rewards_discrete + (1 - done) * self.config.discount * target_next_discrete_q
 
         # 3- compute predicted qs
         # if self.config.num_discrete_actions is not None:

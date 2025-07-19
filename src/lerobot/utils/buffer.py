@@ -36,6 +36,12 @@ class BatchTransition(TypedDict):
     truncated: torch.Tensor
     complementary_info: dict[str, torch.Tensor | float | int] | None = None
 
+    reward_nsteps: torch.Tensor
+    next_state_nsteps: dict[str, torch.Tensor]
+    done_nsteps: torch.Tensor
+    truncated_nsteps: torch.Tensor
+    discount_nsteps: torch.Tensor | None = None
+
 
 def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Tensor:
     """
@@ -70,18 +76,10 @@ def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Te
 
 
 def random_shift(images: torch.Tensor, pad: int = 4):
-    """Vectorized random shift, imgs: (B,C,H,W) | (B,T,C,H,W), pad: #pixels"""
-    if images.ndim == 5:
-        bsize = images.shape[0]
-        images = images.reshape(-1, images.shape[2], images.shape[3], images.shape[4])  # (B*T, C, H, W)
-
+    """Vectorized random shift, imgs: (B,C,H,W), pad: #pixels"""
     _, _, h, w = images.shape
     images = F.pad(input=images, pad=(pad, pad, pad, pad), mode="replicate")
-    images = random_crop_vectorized(images=images, output_size=(h, w))
-
-    if images.ndim == 5:
-        images = images.reshape(bsize, -1, images.shape[1], images.shape[2], images.shape[3])  # (B, T, C, H+2*pad, W+2*pad)
-    return images
+    return random_crop_vectorized(images=images, output_size=(h, w))
 
 
 class ReplayBuffer:
@@ -140,18 +138,12 @@ class ReplayBuffer:
         self,
         state: dict[str, torch.Tensor],
         action: torch.Tensor,
-        action_is_pad: torch.Tensor,
-        reward: torch.Tensor,
-        done: torch.Tensor,
         complementary_info: dict[str, torch.Tensor] | None = None,
     ):
         """Initialize the storage tensors based on the first transition."""
         # Determine shapes from the first transition
         state_shapes = {key: val.squeeze(0).shape for key, val in state.items()}
         action_shape = action.squeeze(0).shape
-        action_is_pad_shape = action_is_pad.squeeze(0).shape
-        reward_shape = reward.squeeze(0).shape
-        done_shape = done.squeeze(0).shape
 
         # Pre-allocate tensors for storage
         self.states = {
@@ -159,8 +151,7 @@ class ReplayBuffer:
             for key, shape in state_shapes.items()
         }
         self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
-        self.actions_is_pad = torch.empty((self.capacity, *action_is_pad_shape), dtype=torch.bool, device=self.storage_device)
-        self.rewards = torch.empty((self.capacity, *reward_shape), device=self.storage_device)
+        self.rewards = torch.empty((self.capacity,), device=self.storage_device)
 
         if not self.optimize_memory:
             # Standard approach: store states and next_states separately
@@ -173,7 +164,7 @@ class ReplayBuffer:
             # Just create a reference to states for consistent API
             self.next_states = self.states  # Just a reference for API consistency
 
-        self.dones = torch.empty((self.capacity, *done_shape), dtype=torch.bool, device=self.storage_device)
+        self.dones = torch.empty((self.capacity,), dtype=torch.bool, device=self.storage_device)
         self.truncateds = torch.empty((self.capacity,), dtype=torch.bool, device=self.storage_device)
 
         # Initialize storage for complementary_info
@@ -205,25 +196,16 @@ class ReplayBuffer:
         self,
         state: dict[str, torch.Tensor],
         action: torch.Tensor,
-        action_is_pad: torch.Tensor,
-        reward: torch.Tensor,
+        reward: float,
         next_state: dict[str, torch.Tensor],
-        done: torch.Tensor,
+        done: bool,
         truncated: bool,
         complementary_info: dict[str, torch.Tensor] | None = None,
     ):
         """Saves a transition, ensuring tensors are stored on the designated storage device."""
         # Initialize storage if this is the first transition
         if not self.initialized:
-            self._initialize_storage(
-                state=state,
-                action=action,
-                action_is_pad=action_is_pad,
-                reward=reward,
-                done=done,
-                # truncated=truncated,
-                complementary_info=complementary_info,
-            )
+            self._initialize_storage(state=state, action=action, complementary_info=complementary_info)
 
         # Store the transition in pre-allocated tensors
         for key in self.states:
@@ -234,7 +216,6 @@ class ReplayBuffer:
                 self.next_states[key][self.position].copy_(next_state[key].squeeze(dim=0))
 
         self.actions[self.position].copy_(action.squeeze(dim=0))
-        self.actions_is_pad[self.position].copy_(action_is_pad.squeeze(dim=0))
         self.rewards[self.position] = reward
         self.dones[self.position] = done
         self.truncateds[self.position] = truncated
@@ -264,77 +245,133 @@ class ReplayBuffer:
         # Random indices for sampling - create on the same device as storage
         idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
 
+        # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
+        self.n_steps = 10
+        self.gamma = 0.99
+
+        # Compute n-step indices with wrap-around
+        steps = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
+        indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+
+        # Retrieve sequences of transitions
+        rewards_seq = self.rewards[indices]  # [batch, n_steps]
+        dones_seq = self.dones[indices]  # [batch, n_steps]
+        truncated_seq = self.truncateds[indices]  # [batch, n_steps]
+
+        # Compute masks: 1 until first done/truncation (inclusive)
+        done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
+        done_idx = done_or_truncated.int().argmax(axis=1)
+        # If no done/truncation, keep full sequence
+        has_done_or_truncated = done_or_truncated.any(axis=1)
+        done_idx = torch.where(has_done_or_truncated, done_idx, self.n_steps - 1)
+        # done_idx = torch.where(has_done_or_truncated, done_idx, torch.full_like(done_idx, self.n_steps - 1))
+
+        mask = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]  # shape: [batch, n_steps]
+        # Compute discount factors for bootstrapping (using target Q-Value)
+        # It is gamma ** n_steps by default but should be adjusted in case of early termination/truncation.
+        target_q_discounts = self.gamma ** mask.sum(axis=1, keepdims=True) #.astype(np.float32)  # [batch, 1]
+
+        # Apply discount
+        discounts = self.gamma ** torch.arange(self.n_steps, dtype=torch.float32, device=self.storage_device) #.reshape(1, -1)  # [1, n_steps]
+        discounted_rewards = rewards_seq * discounts * mask
+        n_step_returns = discounted_rewards.sum(axis=1, keepdims=True)  # [batch, 1]
+
+        # Compute indices of next_obs/done at the final point of the n-step transition
+        last_indices = (idx + done_idx) % self.capacity
+        # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
+        # next_dones = self.dones[last_indices, env_indices][:, None].astype(np.float32)
+        # next_timeouts = self.timeouts[last_indices, env_indices][:, None].astype(np.float32)
+        # final_dones = next_dones * (1.0 - next_timeouts)
+
+        # batch_rewards = self.rewards[idx].to(self.device)
+        batch_rewards_nsteps = n_step_returns.to(self.device)
+        batch_discounts_nsteps = target_q_discounts.to(self.device)
+        batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
+        batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
+
+        # For each sampled index, select the action at idx and mask out actions after done/truncation
+        # batch_actions shape: (batch_size, n_steps, action_dim)
+        actions_seq = self.actions[indices].to(self.device)  # [batch, n_steps, ...]
+        # Create a mask for valid steps (before done/truncation)
+        mask = mask.to(self.device)
+        # Expand mask to match action shape
+        while mask.ndim < actions_seq.ndim:
+            mask = mask.unsqueeze(-1)
+        masked_actions = actions_seq * mask  # Zero out actions after done/truncation
+
+        # For each sample in the batch, keep only actions up to done_idx (inclusive)
+        # This creates a list of tensors of variable length
+        batch_actions = []
+        batch_actions_is_pad = []
+        max_len = mask.sum(dim=1).max().item()
+        for i in range(batch_size):
+            valid_len = mask[i].sum().item()
+            acts = actions_seq[i, :valid_len]
+            pad_len = max_len - valid_len
+            if pad_len > 0:
+                pad = torch.zeros((pad_len, *acts.shape[1:]), dtype=acts.dtype, device=acts.device)
+                acts = torch.cat([acts, pad], dim=0)
+                is_pad = torch.cat([torch.zeros(valid_len, dtype=torch.bool, device=acts.device),
+                            torch.ones(pad_len, dtype=torch.bool, device=acts.device)], dim=0)
+            else:
+                is_pad = torch.zeros(valid_len, dtype=torch.bool, device=acts.device)
+            batch_actions.append(acts)
+            batch_actions_is_pad.append(is_pad)
+        batch_actions = torch.stack(batch_actions, dim=0)  # [batch, max_len, ...]
+        batch_actions_is_pad = torch.stack(batch_actions_is_pad, dim=0)  # [batch, max_len]
+
+        # Gather observations and actions
+        # obs = self._normalize_obs(self.observations[batch_inds, env_indices], env)
+        # actions = self.actions[batch_inds, env_indices]
+
         # Identify image keys that need augmentation
         image_keys = [k for k in self.states if k.startswith("observation.image")] if self.use_drq else []
 
         # Create batched state and next_state
         batch_state = {}
         batch_next_state = {}
+        batch_next_state_nsteps = {}
 
         # First pass: load all state tensors to target device
         for key in self.states:
-            batch_state[key] = self.states[key][idx][:, 0].to(self.device)
+            batch_state[key] = self.states[key][idx].to(self.device)
 
             if not self.optimize_memory:
                 # Standard approach - load next_states directly
                 batch_next_state[key] = self.next_states[key][idx].to(self.device)
             else:
                 # Memory-optimized approach - get next_state from the next index
-                # next_idx = (idx + 1) % self.capacity
-                # batch_next_state[key] = self.states[key][next_idx].to(self.device)
-                batch_next_state[key] = self.states[key][idx][:, 1:].to(self.device)
+                next_idx = (idx + 1) % self.capacity
+                batch_next_state[key] = self.states[key][next_idx].to(self.device)
+
+                batch_next_state_nsteps[key] = self.states[key][last_indices].to(self.device)
 
         # Apply image augmentation in a batched way if needed
         if self.use_drq and image_keys:
-            # # Concatenate all images from state and next_state
-            # all_images = []
-            # for key in image_keys:
-            #     all_images.append(batch_state[key])
-            #     all_images.append(batch_next_state[key])
-
-            # # Optimization: Batch all images and apply augmentation once
-            # all_images_tensor = torch.cat(all_images, dim=0)
-            # augmented_images = self.image_augmentation_function(all_images_tensor)
-
-            # # Split the augmented images back to their sources
-            # for i, key in enumerate(image_keys):
-            #     # Calculate offsets for the current image key:
-            #     # For each key, we have 2*batch_size images (batch_size for states, batch_size for next_states)
-            #     # States start at index i*2*batch_size and take up batch_size slots
-            #     batch_state[key] = augmented_images[i * 2 * batch_size : (i * 2 + 1) * batch_size]
-            #     # Next states start after the states at index (i*2+1)*batch_size and also take up batch_size slots
-            #     batch_next_state[key] = augmented_images[(i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size]
-            
+            # Concatenate all images from state and next_state
             all_images = []
             for key in image_keys:
                 all_images.append(batch_state[key])
+                all_images.append(batch_next_state[key])
+                all_images.append(batch_next_state_nsteps[key])
+
+            # Optimization: Batch all images and apply augmentation once
             all_images_tensor = torch.cat(all_images, dim=0)
             augmented_images = self.image_augmentation_function(all_images_tensor)
+
+            # Split the augmented images back to their sources
             for i, key in enumerate(image_keys):
                 # Calculate offsets for the current image key:
-                # For each key, we have batch_size images (batch_size for states)
-                # States start at index i*batch_size and take up batch_size slots
-                batch_state[key] = augmented_images[i  * batch_size : (i  + 1) * batch_size]
-
-            all_images = []
-            for key in image_keys:
-                all_images.append(batch_next_state[key].reshape(-1, *batch_state[key].shape[1:]))
-            all_images_tensor = torch.cat(all_images, dim=0)
-            augmented_images = self.image_augmentation_function(all_images_tensor)
-            
-            for i, key in enumerate(image_keys):
-                # Calculate offsets for the current image key:
-                # For each key, we have 10*batch_size images (batch_size for states)
-                # States start at index i*10*batch_size and take up batch_size slots
-                # import pdb; pdb.set_trace()
-                batch_next_state[key] = augmented_images[i * 10 * batch_size : (i + 1) * 10 * batch_size].reshape(batch_size, 10, *batch_state[key].shape[1:])
-                
-
-            # all_images.append(batch_next_state[key].reshape(batch_size, -1, *batch_state[key].shape[1:]))
+                # For each key, we have 3*batch_size images (batch_size for states, batch_size for next_states)
+                # States start at index i*2*batch_size and take up batch_size slots
+                batch_state[key] = augmented_images[i * 3 * batch_size : (i * 3 + 1) * batch_size]
+                # Next states start after the states at index (i*2+1)*batch_size and also take up batch_size slots
+                batch_next_state[key] = augmented_images[(i * 3 + 1) * batch_size : (i * 3 + 2) * batch_size]
+                # Next states n-steps start after the next states at index (i*3+2)*batch_size and also take up batch_size slots
+                batch_next_state_nsteps[key] = augmented_images[(i * 3 + 2) * batch_size : (i * 3 + 3) * batch_size]
 
         # Sample other tensors
-        batch_actions = self.actions[idx].to(self.device)
-        batch_actions_is_pad = self.actions_is_pad[idx].to(self.device)
+        # batch_actions = self.actions[idx].to(self.device)
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
@@ -350,11 +387,18 @@ class ReplayBuffer:
             state=batch_state,
             action=batch_actions,
             action_is_pad=batch_actions_is_pad,
+            # action_is_pad=torch.zeros((*batch_actions.shape[:-1],), dtype=torch.bool, device=self.device),
             reward=batch_rewards,
             next_state=batch_next_state,
             done=batch_dones,
             truncated=batch_truncateds,
             complementary_info=batch_complementary_info,
+
+            reward_nsteps=batch_rewards_nsteps,
+            next_state_nsteps=batch_next_state_nsteps,
+            done_nsteps=batch_dones_nsteps,
+            truncated_nsteps=batch_truncateds_nsteps,
+            discount_nsteps=batch_discounts_nsteps,
         )
 
     def get_iterator(
@@ -522,10 +566,6 @@ class ReplayBuffer:
             first_transition = list_transition[0]
             first_state = {k: v.to(device) for k, v in first_transition["state"].items()}
             first_action = first_transition["action"].to(device)
-            first_action_is_pad = first_transition["action_is_pad"].to(device)
-            first_reward = first_transition["reward"].to(device)
-            first_done = first_transition["done"].to(device)
-            # first_truncated = first_transition["truncated"].to(device)
 
             # Get complementary info if available
             first_complementary_info = None
@@ -538,13 +578,7 @@ class ReplayBuffer:
                 }
 
             replay_buffer._initialize_storage(
-                state=first_state,
-                action=first_action,
-                action_is_pad=first_action_is_pad,
-                reward=first_reward,
-                done=first_done,
-                # truncated=first_truncated,
-                complementary_info=first_complementary_info,
+                state=first_state, action=first_action, complementary_info=first_complementary_info
             )
 
         # Fill the buffer with all transitions
@@ -557,16 +591,14 @@ class ReplayBuffer:
                     data[k] = v.to(storage_device)
 
             action = data["action"]
-            action_is_pad =  data["action_is_pad"]
 
             replay_buffer.add(
                 state=data["state"],
                 action=action,
-                action_is_pad=action_is_pad,
                 reward=data["reward"],
                 next_state=data["next_state"],
                 done=data["done"],
-                truncated=False,  # NOTE: Truncation are not supported yet in lerobot dataset
+                truncated=data["truncated"],  # NOTE: Truncation are not supported yet in lerobot dataset
                 complementary_info=data.get("complementary_info", None),
             )
 
@@ -739,49 +771,53 @@ class ReplayBuffer:
 
             # ----- 1) Current state -----
             current_state: dict[str, torch.Tensor] = {}
-            # next_state: dict[str, torch.Tensor] = {}
             for key in state_keys:
                 val = current_sample[key]
                 current_state[key] = val.unsqueeze(0)  # Add batch dimension
-                # next_state[key] = val[1:, :].unsqueeze(0)  # Add batch dimension
 
             # ----- 2) Action -----
             action = current_sample["action"].unsqueeze(0)  # Add batch dimension
-            action_is_pad = current_sample["action_is_pad"].unsqueeze(0)
 
             # ----- 3) Reward and done -----
-            reward = current_sample["next.reward"]
+            reward = float(current_sample["next.reward"].item())  # ensure float
 
-            done = current_sample["next.done"]
             # Determine done flag - use next.done if available, otherwise infer from episode boundaries
-            # if has_done_key:
-            #     done = bool(current_sample["next.done"].item())  # ensure bool
-            # else:
-            #     # If this is the last frame or if next frame is in a different episode, mark as done
-            #     done = False
-            #     if i == num_frames - 1:
-            #         done = True
-            #     elif i < num_frames - 1:
-            #         next_sample = dataset[i + 1]
-            #         if next_sample["episode_index"] != current_sample["episode_index"]:
-            #             done = True
+            if has_done_key:
+                done = bool(current_sample["next.done"].item())  # ensure bool
+            else:
+                # If this is the last frame or if next frame is in a different episode, mark as done
+                done = False
+                if i == num_frames - 1:
+                    done = True
+                elif i < num_frames - 1:
+                    next_sample = dataset[i + 1]
+                    if next_sample["episode_index"] != current_sample["episode_index"]:
+                        done = True
 
             # TODO: (azouitine) Handle truncation (using the same value as done for now)
-            truncated = done
+            truncated = False
+            if not done:
+                # If this is the last frame or if next frame is in a different episode, mark as truncated
+                if i == num_frames - 1:
+                    truncated = True
+                elif i < num_frames - 1:
+                    next_sample = dataset[i + 1]
+                    if next_sample["episode_index"] != current_sample["episode_index"]:
+                        truncated = True
 
             # ----- 4) Next state -----
             # If not done and the next sample is in the same episode, we pull the next sample's state.
             # Otherwise (done=True or next sample crosses to a new episode), next_state = current_state.
-            # next_state = current_state  # default
-            # if not done[0].item() and (i < num_frames - 1):
-            #     next_sample = dataset[i + 1]
-            #     if next_sample["episode_index"] == current_sample["episode_index"]:
-            #         # Build next_state from the same keys
-            #         next_state_data: dict[str, torch.Tensor] = {}
-            #         for key in state_keys:
-            #             val = next_sample[key]
-            #             next_state_data[key] = val.unsqueeze(0)  # Add batch dimension
-            #         next_state = next_state_data
+            next_state = current_state  # default
+            if not done and (i < num_frames - 1):
+                next_sample = dataset[i + 1]
+                if next_sample["episode_index"] == current_sample["episode_index"]:
+                    # Build next_state from the same keys
+                    next_state_data: dict[str, torch.Tensor] = {}
+                    for key in state_keys:
+                        val = next_sample[key]
+                        next_state_data[key] = val.unsqueeze(0)  # Add batch dimension
+                    next_state = next_state_data
 
             # ----- 5) Complementary info (if available) -----
             complementary_info = None
@@ -803,9 +839,8 @@ class ReplayBuffer:
             transition = Transition(
                 state=current_state,
                 action=action,
-                action_is_pad=action_is_pad,
                 reward=reward,
-                next_state={},
+                next_state=next_state,
                 done=done,
                 truncated=truncated,
                 complementary_info=complementary_info,
@@ -878,6 +913,9 @@ def concatenate_batch_transitions(
     left_batch_transitions["reward"] = torch.cat(
         [left_batch_transitions["reward"], right_batch_transition["reward"]], dim=0
     )
+    left_batch_transitions["reward_nsteps"] = torch.cat(
+        [left_batch_transitions["reward_nsteps"], right_batch_transition["reward_nsteps"]], dim=0
+    )
 
     # Concatenate next_state fields
     left_batch_transitions["next_state"] = {
@@ -887,6 +925,13 @@ def concatenate_batch_transitions(
         )
         for key in left_batch_transitions["next_state"]
     }
+    left_batch_transitions["next_state_nsteps"] = {
+        key: torch.cat(
+            [left_batch_transitions["next_state_nsteps"][key], right_batch_transition["next_state_nsteps"][key]],
+            dim=0,
+        )
+        for key in left_batch_transitions["next_state_nsteps"]
+    }
 
     # Concatenate done and truncated fields
     left_batch_transitions["done"] = torch.cat(
@@ -895,6 +940,17 @@ def concatenate_batch_transitions(
     left_batch_transitions["truncated"] = torch.cat(
         [left_batch_transitions["truncated"], right_batch_transition["truncated"]],
         dim=0,
+    )
+    left_batch_transitions["done_nsteps"] = torch.cat(
+        [left_batch_transitions["done_nsteps"], right_batch_transition["done_nsteps"]], dim=0
+    )
+    left_batch_transitions["truncated_nsteps"] = torch.cat(
+        [left_batch_transitions["truncated_nsteps"], right_batch_transition["truncated_nsteps"]],
+        dim=0,
+    )
+
+    left_batch_transitions["discount_nsteps"] = torch.cat(
+        [left_batch_transitions["discount_nsteps"], right_batch_transition["discount_nsteps"]], dim=0
     )
 
     # Handle complementary_info

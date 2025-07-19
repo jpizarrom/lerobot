@@ -388,8 +388,8 @@ def add_actor_information_and_train(
         )
 
         # Wait until the replay buffer has enough samples to start training
-        if len(replay_buffer) < online_step_before_learning:
-            continue
+        # if len(replay_buffer) < online_step_before_learning:
+        #     continue
 
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
@@ -404,15 +404,15 @@ def add_actor_information_and_train(
         time_for_one_optimization_step = time.time()
         for _ in range(utd_ratio - 1):
             # Sample from the iterators
-            batch = next(online_iterator)
+            # batch = next(online_iterator)
 
             if dataset_repo_id is not None:
                 batch_offline = next(offline_iterator)
                 # batch_offline["action_is_pad"]
-                # batch = batch_offline
-                batch = concatenate_batch_transitions(
-                    left_batch_transitions=batch, right_batch_transition=batch_offline
-                )
+                batch = batch_offline
+                # batch = concatenate_batch_transitions(
+                #     left_batch_transitions=batch, right_batch_transition=batch_offline
+                # )
                 # batch["action_is_pad"]
 
             actions = batch["action"]
@@ -422,6 +422,12 @@ def add_actor_information_and_train(
             done = batch["done"]
             actions_is_pad = batch["action_is_pad"]
             check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
+
+            reward_nsteps = batch["reward_nsteps"]
+            next_observation_nsteps = batch["next_state_nsteps"]
+            done_nsteps = batch["done_nsteps"]
+            truncated_nsteps = batch["truncated_nsteps"]
+            discount_nsteps = batch["discount_nsteps"]
             
 
             observation_features, next_observation_features = get_observation_features(
@@ -441,6 +447,12 @@ def add_actor_information_and_train(
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch["complementary_info"],
+
+                "reward_nsteps": reward_nsteps,
+                "next_state_nsteps": next_observation_nsteps,
+                "done_nsteps": done_nsteps,
+                "truncated_nsteps": truncated_nsteps,
+                "discount_nsteps": discount_nsteps,
             }
 
             # Use the forward method for critic loss
@@ -470,15 +482,15 @@ def add_actor_information_and_train(
             policy.update_target_networks()
 
         # Sample for the last update in the UTD ratio
-        batch = next(online_iterator)
+        # batch = next(online_iterator)
 
         if dataset_repo_id is not None:
             batch_offline = next(offline_iterator)
             # batch_offline["action"]
-            # batch = batch_offline
-            batch = concatenate_batch_transitions(
-                left_batch_transitions=batch, right_batch_transition=batch_offline
-            )
+            batch = batch_offline
+            # batch = concatenate_batch_transitions(
+            #     left_batch_transitions=batch, right_batch_transition=batch_offline
+            # )
 
         actions = batch["action"]
         rewards = batch["reward"]
@@ -486,6 +498,12 @@ def add_actor_information_and_train(
         next_observations = batch["next_state"]
         done = batch["done"]
         actions_is_pad = batch["action_is_pad"]
+
+        reward_nsteps = batch["reward_nsteps"]
+        next_observation_nsteps = batch["next_state_nsteps"]
+        done_nsteps = batch["done_nsteps"]
+        truncated_nsteps = batch["truncated_nsteps"]
+        discount_nsteps = batch["discount_nsteps"]
 
         check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
@@ -505,6 +523,12 @@ def add_actor_information_and_train(
             "done": done,
             "observation_feature": observation_features,
             "next_observation_feature": next_observation_features,
+
+            "reward_nsteps": reward_nsteps,
+            "next_state_nsteps": next_observation_nsteps,
+            "done_nsteps": done_nsteps,
+            "truncated_nsteps": truncated_nsteps,
+            "discount_nsteps": discount_nsteps,
         }
 
         critic_output = policy.forward(forward_batch, model="critic")
@@ -1291,42 +1315,42 @@ def process_transitions(
                 logging.warning("[LEARNER] NaN detected in transition, skipping")
                 continue
 
-            # pad to [1, 50, 4]
-            action = transition["action"] # [1, 4]
-            action = einops.repeat(action, "b a -> b e a", e=chunk_size)
-            transition["action"] = action
+            # # pad to [1, 50, 4]
+            # action = transition["action"] # [1, 4]
+            # action = einops.repeat(action, "b a -> b e a", e=chunk_size)
+            # transition["action"] = action
 
-            transition["action_is_pad"] = torch.cat([
-                torch.zeros(action.shape[0], 1, dtype=torch.bool,device=action.device),
-                torch.ones(action.shape[0], chunk_size-1, dtype=torch.bool, device=action.device)
-            ], dim=1)
+            # transition["action_is_pad"] = torch.cat([
+            #     torch.zeros(action.shape[0], 1, dtype=torch.bool,device=action.device),
+            #     torch.ones(action.shape[0], chunk_size-1, dtype=torch.bool, device=action.device)
+            # ], dim=1)
 
-            reward = transition["reward"]
-            reward = einops.repeat(reward, "b -> b e", e=chunk_size)
-            transition["reward"] = reward
+            # reward = transition["reward"]
+            # reward = einops.repeat(reward, "b -> b e", e=chunk_size)
+            # transition["reward"] = reward
 
-            done = transition["done"]
-            done = einops.repeat(done, "b -> b e", e=chunk_size)
-            transition["done"] = done
+            # done = transition["done"]
+            # done = einops.repeat(done, "b -> b e", e=chunk_size)
+            # transition["done"] = done
 
-            state = transition["state"]
-            # ['observation.images.front', 'observation.images.wrist', 'observation.state']
-            # Actual state and next chunk size is chunk_size+1
-            for k in state.keys():
-                if state[k].dim() == 2:
-                    # If the state is 2D, we need to repeat it to match the chunk size
-                    state[k] = einops.repeat(state[k], "b a -> b e a", e=chunk_size+1)
-                elif state[k].dim() == 3:
-                    # If the state is 3D, we need to repeat it to match the chunk size
-                    state[k] = einops.repeat(state[k], "b c h -> b e c h", e=chunk_size+1)
-                elif state[k].dim() == 4:
-                    # If the state is 4D, we need to repeat it to match the chunk size
-                    state[k] = einops.repeat(state[k], "b c h w -> b e c h w", e=chunk_size+1)
-                else:
-                    raise ValueError(
-                        f"Unsupported state dimension {state[k].dim()} for key {k}. Expected 2D or 3D tensor."
-                    )
-            transition["state"] = state
+            # state = transition["state"]
+            # # ['observation.images.front', 'observation.images.wrist', 'observation.state']
+            # # Actual state and next chunk size is chunk_size+1
+            # for k in state.keys():
+            #     if state[k].dim() == 2:
+            #         # If the state is 2D, we need to repeat it to match the chunk size
+            #         state[k] = einops.repeat(state[k], "b a -> b e a", e=chunk_size+1)
+            #     elif state[k].dim() == 3:
+            #         # If the state is 3D, we need to repeat it to match the chunk size
+            #         state[k] = einops.repeat(state[k], "b c h -> b e c h", e=chunk_size+1)
+            #     elif state[k].dim() == 4:
+            #         # If the state is 4D, we need to repeat it to match the chunk size
+            #         state[k] = einops.repeat(state[k], "b c h w -> b e c h w", e=chunk_size+1)
+            #     else:
+            #         raise ValueError(
+            #             f"Unsupported state dimension {state[k].dim()} for key {k}. Expected 2D or 3D tensor."
+            #         )
+            # transition["state"] = state
 
             # import pdb; pdb.set_trace()
 
