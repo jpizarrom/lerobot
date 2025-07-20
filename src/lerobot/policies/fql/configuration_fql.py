@@ -106,6 +106,8 @@ class FQLConfig(PreTrainedConfig):
     hyperparameters.
     """
 
+    chunk_size: int = 10
+
     # Mapping of feature types to normalization modes
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {

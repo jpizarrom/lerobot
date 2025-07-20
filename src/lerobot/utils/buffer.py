@@ -36,6 +36,8 @@ class BatchTransition(TypedDict):
     truncated: torch.Tensor
     complementary_info: dict[str, torch.Tensor | float | int] | None = None
 
+    # action_nsteps: torch.Tensor
+    # action_nsteps_is_pad: torch.Tensor
     reward_nsteps: torch.Tensor
     next_state_nsteps: dict[str, torch.Tensor]
     done_nsteps: torch.Tensor
@@ -249,9 +251,13 @@ class ReplayBuffer:
         self.n_steps = 10
         self.gamma = 0.99
 
+        last_valid_index = self.position - 1
+        original_truncated_values = self.truncateds[last_valid_index].clone()
+        self.truncateds[last_valid_index] = torch.logical_or(original_truncated_values, torch.logical_not(self.dones[last_valid_index]))
+
         # Compute n-step indices with wrap-around
         steps = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
-        indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+        indices = (idx[:, None] + steps) % self.size  # shape: [batch, n_steps]
 
         # Retrieve sequences of transitions
         rewards_seq = self.rewards[indices]  # [batch, n_steps]
@@ -277,7 +283,7 @@ class ReplayBuffer:
         n_step_returns = discounted_rewards.sum(axis=1, keepdims=True)  # [batch, 1]
 
         # Compute indices of next_obs/done at the final point of the n-step transition
-        last_indices = (idx + done_idx) % self.capacity
+        last_indices = (idx + done_idx) % self.size
         # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
         # next_dones = self.dones[last_indices, env_indices][:, None].astype(np.float32)
         # next_timeouts = self.timeouts[last_indices, env_indices][:, None].astype(np.float32)
@@ -290,36 +296,22 @@ class ReplayBuffer:
         # batch_dones_nsteps = torch.logical_or(self.dones[last_indices], self.truncateds[last_indices]).to(self.device).float()
         batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
 
-        # For each sampled index, select the action at idx and mask out actions after done/truncation
-        # batch_actions shape: (batch_size, n_steps, action_dim)
-        actions_seq = self.actions[indices].to(self.device)  # [batch, n_steps, ...]
+        # batch_actions [batch, n_steps, ...] copy actions until done_idx, then copy last action
+        batch_actions = self.actions[indices] # [batch, n_steps, ...]
         # Create a mask for valid steps (before done/truncation)
-        mask = mask.to(self.device)
+        mask = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]  # [batch, n_steps]
         # Expand mask to match action shape
-        while mask.ndim < actions_seq.ndim:
-            mask = mask.unsqueeze(-1)
-        masked_actions = actions_seq * mask  # Zero out actions after done/truncation
+        # Expand mask to match action shape using .view and .expand
+        mask_expanded = mask.view(batch_size, self.n_steps, *([1] * (batch_actions.ndim - 2))).expand_as(batch_actions)
+        # Mask out actions after done/truncation
+        batch_actions = batch_actions * mask_expanded  # Zero out actions after done/truncation
+        batch_actions_is_pad = ~mask
 
-        # For each sample in the batch, keep only actions up to done_idx (inclusive)
-        # This creates a list of tensors of variable length
-        batch_actions = []
-        batch_actions_is_pad = []
-        max_len = mask.sum(dim=1).max().item()
-        for i in range(batch_size):
-            valid_len = mask[i].sum().item()
-            acts = actions_seq[i, :valid_len]
-            pad_len = max_len - valid_len
-            if pad_len > 0:
-                pad = torch.zeros((pad_len, *acts.shape[1:]), dtype=acts.dtype, device=acts.device)
-                acts = torch.cat([acts, pad], dim=0)
-                is_pad = torch.cat([torch.zeros(valid_len, dtype=torch.bool, device=acts.device),
-                            torch.ones(pad_len, dtype=torch.bool, device=acts.device)], dim=0)
-            else:
-                is_pad = torch.zeros(valid_len, dtype=torch.bool, device=acts.device)
-            batch_actions.append(acts)
-            batch_actions_is_pad.append(is_pad)
-        batch_actions = torch.stack(batch_actions, dim=0)  # [batch, max_len, ...]
-        batch_actions_is_pad = torch.stack(batch_actions_is_pad, dim=0)  # [batch, max_len]
+        batch_actions = batch_actions.to(self.device)  # Move actions to the target device
+        batch_actions_is_pad = batch_actions_is_pad.to(self.device)  # Move action mask to the target device
+
+        # Revert back tmp changes to avoid sampling across episodes
+        self.truncateds[last_valid_index] = original_truncated_values
 
         # Gather observations and actions
         # obs = self._normalize_obs(self.observations[batch_inds, env_indices], env)
@@ -340,6 +332,7 @@ class ReplayBuffer:
             if not self.optimize_memory:
                 # Standard approach - load next_states directly
                 batch_next_state[key] = self.next_states[key][idx].to(self.device)
+                batch_next_state_nsteps[key] = self.next_states[key][last_indices].to(self.device)
             else:
                 # Memory-optimized approach - get next_state from the next index
                 next_idx = (idx + 1) % self.capacity
@@ -387,6 +380,7 @@ class ReplayBuffer:
 
         return BatchTransition(
             state=batch_state,
+            # action=batch_actions[:,0],
             action=batch_actions,
             action_is_pad=batch_actions_is_pad,
             # action_is_pad=torch.zeros((*batch_actions.shape[:-1],), dtype=torch.bool, device=self.device),
@@ -396,6 +390,8 @@ class ReplayBuffer:
             truncated=batch_truncateds,
             complementary_info=batch_complementary_info,
 
+            # action_nsteps=batch_actions[:, 1:],  # Get all but the first element
+            # action_nsteps_is_pad=batch_actions_is_pad[:, 1:],  # Get all but the first element
             reward_nsteps=batch_rewards_nsteps,
             next_state_nsteps=batch_next_state_nsteps,
             done_nsteps=batch_dones_nsteps,

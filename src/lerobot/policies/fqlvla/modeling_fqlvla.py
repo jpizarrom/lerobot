@@ -759,7 +759,7 @@ class FQLVLAPolicy(
         from lerobot.configs.train import TrainRLServerPipelineConfig
         from lerobot.datasets.factory import make_dataset
 
-        cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq10.json")
+        cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
         cfg.policy.chunk_size = 10
         # offline_dataset = make_dataset(cfg)
         # for k in ["min", "max", "mean", "std"]:

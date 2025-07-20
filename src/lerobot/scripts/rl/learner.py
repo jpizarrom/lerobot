@@ -889,7 +889,8 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_bc_flow.named_parameters()
-            if True or not n.startswith("encoder")
+            if not policy.config.shared_encoder or not n.startswith("encoder")
+            # if not n.startswith("encoder.vla.model.vlm_with_expert.vlm")
         ],
         lr=cfg.policy.actor_lr,
     )
@@ -897,7 +898,8 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_onestep_flow.named_parameters()
-            if True or not n.startswith("encoder")
+            if not policy.config.shared_encoder or not n.startswith("encoder")
+            # if not n.startswith("encoder.vla.model.vlm_with_expert.vlm")
         ],
         lr=cfg.policy.actor_lr,
     )
@@ -1233,12 +1235,12 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
         )
     }
 
-    # Add discrete critic if it exists
-    if hasattr(policy, "discrete_critic") and policy.discrete_critic is not None:
-        state_dicts["discrete_critic"] = move_state_dict_to_device(
-            policy.discrete_critic.state_dict(), device="cpu"
-        )
-        logging.debug("[LEARNER] Including discrete critic in state dict push")
+    # # Add discrete critic if it exists
+    # if hasattr(policy, "discrete_critic") and policy.discrete_critic is not None:
+    #     state_dicts["discrete_critic"] = move_state_dict_to_device(
+    #         policy.discrete_critic.state_dict(), device="cpu"
+    #     )
+    #     logging.debug("[LEARNER] Including discrete critic in state dict push")
 
     # Add actor_bc_flow if it exists
     if hasattr(policy, "actor_bc_flow") and policy.actor_bc_flow is not None:

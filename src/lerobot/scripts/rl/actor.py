@@ -51,6 +51,7 @@ import os
 import time
 from functools import lru_cache
 from queue import Empty
+from pprint import pformat
 
 import grpc
 import torch
@@ -235,6 +236,8 @@ def act_with_policy(
         log_file = os.path.join(log_dir, f"actor_policy_{os.getpid()}.log")
         init_logging(log_file=log_file, display_pid=True)
         logging.info("Actor policy process logging initialized")
+    
+    logging.info(pformat(cfg.to_dict()))
 
     logging.info("make_env online")
 
@@ -673,6 +676,14 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
             )
             policy.discrete_critic.load_state_dict(discrete_critic_state_dict)
             logging.info("[ACTOR] Loaded discrete critic parameters from Learner.")
+
+        # Load discrete actor if present
+        if hasattr(policy, "discrete_actor") and "discrete_actor" in state_dicts:
+            discrete_actor_state_dict = move_state_dict_to_device(
+                state_dicts["discrete_actor"], device=device
+            )
+            policy.discrete_actor.load_state_dict(discrete_actor_state_dict)
+            logging.info("[ACTOR] Loaded discrete actor parameters from Learner.")
 
         # Load actor_bc_flow if present
         if hasattr(policy, "actor_bc_flow") and "actor_bc_flow" in state_dicts:
