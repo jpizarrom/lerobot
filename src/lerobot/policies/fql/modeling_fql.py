@@ -156,7 +156,7 @@ class FQLPolicy(
             # discrete_action_value = self.discrete_critic(batch, observations_features)
             # discrete_action = torch.argmax(discrete_action_value, dim=-1, keepdim=True)
             actions = torch.cat([actions, discrete_action.unsqueeze(-1)], dim=-1)
-        
+
         return actions
 
     def critic_forward(
@@ -391,15 +391,12 @@ class FQLPolicy(
             # In the buffer we have the full action space (continuous + discrete)
             # We need to split them before concatenating them in the critic forward
             actions: Tensor = actions[:, : ,:DISCRETE_DIMENSION_INDEX]
-        
-        # import pdb;pdb.set_trace()
+
         # actions = actions[:, 0, :3] # TODO: use all chunks
         # actions = actions * (~actions_is_pad).unsqueeze(-1)
         actions = actions[:, :, :3].reshape(
             actions.shape[0], -1
         ) # [32, 150]
-
-        # import pdb;pdb.set_trace()
         
         q_preds = self.critic_forward(
             observations=observations,
@@ -711,12 +708,22 @@ class FQLPolicy(
         """Initialize shared or separate encoders for actor and critic."""
         self.shared_encoder = self.config.shared_encoder
         self.encoder_critic = SACObservationEncoder(self.config, self.normalize_inputs)
+        self.encoder_discrete_critic = (
+            self.encoder_critic
+            if self.shared_encoder
+            else SACObservationEncoder(self.config, self.normalize_inputs)
+        )
         self.encoder_actor_bc_flow = (
             self.encoder_critic
             if self.shared_encoder
             else SACObservationEncoder(self.config, self.normalize_inputs)
         )
         self.encoder_actor_onestep_flow = (
+            self.encoder_critic
+            if self.shared_encoder
+            else SACObservationEncoder(self.config, self.normalize_inputs)
+        )
+        self.encoder_discrete_actor = (
             self.encoder_critic
             if self.shared_encoder
             else SACObservationEncoder(self.config, self.normalize_inputs)
@@ -757,25 +764,25 @@ class FQLPolicy(
         """Build discrete discrete critic ensemble and target networks."""
         heads = [
             DiscreteCriticHead(
-                input_dim=self.encoder_critic.output_dim,
+                input_dim=self.encoder_discrete_critic.output_dim,
                 output_dim=self.config.num_discrete_actions,
                 **asdict(self.config.discrete_critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
         ]
         self.discrete_critic = DiscreteCriticEnsemble(
-            encoder=self.encoder_critic, ensemble=heads
+            encoder=self.encoder_discrete_critic, ensemble=heads
         )
         target_heads = [
             DiscreteCriticHead(
-                input_dim=self.encoder_critic.output_dim,
+                input_dim=self.encoder_discrete_critic.output_dim,
                 output_dim=self.config.num_discrete_actions,
                 **asdict(self.config.discrete_critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
         ]
         self.discrete_critic_target = DiscreteCriticEnsemble(
-            encoder=self.encoder_critic, ensemble=target_heads
+            encoder=self.encoder_discrete_critic, ensemble=target_heads
         )
 
         # TODO: (maractingi, azouitine) Compile the discrete critic
@@ -815,9 +822,9 @@ class FQLPolicy(
 
     def _init_discrete_actor(self):
         self.discrete_actor = DiscretePolicy(
-            encoder=self.encoder_actor_onestep_flow,
+            encoder=self.encoder_discrete_actor,
             network=MLP(
-                input_dim=self.encoder_actor_onestep_flow.output_dim,
+                input_dim=self.encoder_discrete_actor.output_dim,
                 **asdict(self.config.discrete_actor_network_kwargs),
             ),
             action_dim=self.config.num_discrete_actions,
