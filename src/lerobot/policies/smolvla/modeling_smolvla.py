@@ -170,7 +170,13 @@ def load_smolvla(
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
-    if not all(key.startswith(norm_keys) for key in missing) or not all(key.startswith(("model.vlm_with_expert.vlm",)) for key in unexpected) :
+    # if not all(key.startswith(norm_keys) for key in missing) or not all(key.startswith(("model.vlm_with_expert.vlm",)) for key in unexpected) :
+    #     raise RuntimeError(
+    #         "SmolVLA %d missing / %d unexpected keys",
+    #         len(missing),
+    #         len(unexpected),
+    #     )
+    if not all(key.startswith(norm_keys) for key in missing) or unexpected:
         raise RuntimeError(
             "SmolVLA %d missing / %d unexpected keys",
             len(missing),
@@ -747,6 +753,14 @@ class VLAFlowMatching(nn.Module):
         time_beta = sample_beta(1.5, 1.0, bsize, device)
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=torch.float32, device=device)
+        # time = torch.normal(
+        #     mean=0.0,
+        #     std=1.0,
+        #     size=(bsize,),
+        #     dtype=torch.float32,
+        #     device=device,
+        # )
+        # return time
 
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks, state: torch.Tensor = None
@@ -885,6 +899,34 @@ class VLAFlowMatching(nn.Module):
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
         return embs, pad_masks, att_masks
 
+    def embed_suffix_notime(self, noisy_actions, chunk_size=None):
+        """Embed state, noisy_actions to prepare for Expert Gemma processing."""
+        embs = []
+        pad_masks = []
+        att_masks = []
+
+        # Only embed actions, do not use time
+        action_emb = self.action_in_proj(noisy_actions)
+        # action_emb = F.silu(action_emb)  # swish == silu
+        # action_emb = self.action_time_mlp_out(action_emb)
+        device = action_emb.device
+        # bsize = action_emb.shape[0]
+
+        # Add to input tokens
+        embs.append(action_emb)
+
+        bsize, action_dim = action_emb.shape[:2]
+        action_mask = torch.ones(bsize, action_dim, dtype=torch.bool, device=device)
+        pad_masks.append(action_mask)
+
+        # Set attention masks so that image, language and state inputs do not attend to action tokens
+        att_masks += [1] * (chunk_size or self.config.chunk_size)
+        embs = torch.cat(embs, dim=1)
+        pad_masks = torch.cat(pad_masks, dim=1)
+        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
+        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+        return embs, pad_masks, att_masks
+
     def forward(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
     ) -> Tensor:
@@ -929,7 +971,6 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
-        # import pdb;pdb.set_trace()
         return losses, v_t
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
@@ -1022,14 +1063,14 @@ class VLAFlowMatching(nn.Module):
             actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
         
-        time = self.sample_time(noise.shape[0], noise.device)
+        # time = self.sample_time(noise.shape[0], noise.device)
         
         x_t = noise
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state=state
         )
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix_notime(x_t)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
@@ -1049,7 +1090,6 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         # losses = F.mse_loss(u_t, v_t, reduction="none")
-        # import pdb;pdb.set_trace()
         return v_t
 
         # prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(

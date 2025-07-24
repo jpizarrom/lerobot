@@ -885,12 +885,16 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         - `lr_scheduler`: Currently set to `None` but can be extended to support learning rate scheduling.
 
     """
+    params_to_skip = [
+        "encoder.vla.model.vlm_with_expert.vlm.",
+        # "encoder.vla.model.state_proj.",
+    ]
     optimizer_actor_bc_flow = torch.optim.Adam(
         params=[
             p
             for n, p in policy.actor_bc_flow.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
-            # if not n.startswith("encoder.vla.model.vlm_with_expert.vlm")
+            # if not policy.config.shared_encoder or not n.startswith("encoder")
+            if not any(n.startswith(p) for p in params_to_skip)
         ],
         lr=cfg.policy.actor_lr,
     )
@@ -898,8 +902,8 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_onestep_flow.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
-            # if not n.startswith("encoder.vla.model.vlm_with_expert.vlm")
+            # if not policy.config.shared_encoder or not n.startswith("encoder")
+            if not any(n.startswith(p) for p in params_to_skip)
         ],
         lr=cfg.policy.actor_lr,
     )

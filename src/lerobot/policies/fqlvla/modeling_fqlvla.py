@@ -52,6 +52,7 @@ from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks
+from lerobot.policies.smolvla.modeling_smolvla import pad_vector
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
@@ -121,7 +122,7 @@ class FQLVLAPolicy(
         #     observations_features = self.actor_onestep_flow.encoder.get_cached_image_features(batch, normalize=True)
 
         batch_with_task = {
-            "task": "pick up the cube",
+            "task": "pick up the pink cube",
             **batch,
         }
 
@@ -129,6 +130,7 @@ class FQLVLAPolicy(
         # actions = self.actor_onestep_flow.encoder.vla.select_action(batch_with_task)
 
         actions = self.actor_onestep_flow.encoder.vla.select_action_onestep(batch_with_task)
+        actions = torch.clamp(actions, -1.0, 1.0)
         
         # _, _, actions = self.actor_onestep_flow(batch_with_task, observations_features)
         # # Unpad actions
@@ -137,7 +139,7 @@ class FQLVLAPolicy(
         # actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actions})["action"]
         # actions = actions[:, 0, :]  # Use only the continuous action part
 
-        actions = torch.clamp(actions, -1.0, 1.0)
+        # actions = torch.clamp(actions, -1.0, 1.0)
 
         if self.config.num_discrete_actions is not None:
             discrete_action, _, _ = self.discrete_actor(batch, observations_features)
@@ -248,8 +250,7 @@ class FQLVLAPolicy(
             complementary_info = batch.get("complementary_info")
             loss_discrete_critic, info = self.compute_loss_discrete_critic(
                 observations=observations,
-                actions=actions,
-                actions_is_pad=actions_is_pad,
+                actions=actions[:, 0],
                 rewards=rewards,
                 next_observations=next_observations,
                 done=done,
@@ -357,8 +358,10 @@ class FQLVLAPolicy(
             _, _, next_actions = self.actor_onestep_flow(next_observations, next_observation_features)
             next_actions = next_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
             next_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": next_actions})["action"]
+            # next_actions = torch.clamp(next_actions, -1.0, 1.0)
+            
             # next_actions = self.select_action(next_observations)
-            next_actions = torch.clamp(next_actions, -1.0, 1.0)
+            
 
             # next_actions = next_actions[:, 0, :3] # TODO: use all chunks
             # next_actions = next_actions * (~actions_is_pad).unsqueeze(-1)
@@ -391,7 +394,6 @@ class FQLVLAPolicy(
             
             # if self.config.use_backup_entropy:
             #     min_q = min_q - (self.temperature * next_log_probs)
-            # import pdb;pdb.set_trace()
 
             # # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
             # done_idx = done.argmax(axis=1)
@@ -415,14 +417,13 @@ class FQLVLAPolicy(
             # In the buffer we have the full action space (continuous + discrete)
             # We need to split them before concatenating them in the critic forward
             actions: Tensor = actions[:, : ,:DISCRETE_DIMENSION_INDEX]
-        
+
+        # actions = pad_vector(actions, 32)
         # actions = actions[:, 0, :3] # TODO: use all chunks
-        actions = actions * (~actions_is_pad).unsqueeze(-1)
-        actions = actions[:, :, :3].reshape(
+        # actions = actions * (~actions_is_pad).unsqueeze(-1)
+        actions = actions[:, :, :].reshape(
             actions.shape[0], -1
         ) # [32, 150]
-
-        # import pdb;pdb.set_trace()
         
         q_preds = self.critic_forward(
             observations=observations,
@@ -458,7 +459,6 @@ class FQLVLAPolicy(
         self,
         observations,
         actions,
-        actions_is_pad: Tensor,
         rewards,
         next_observations,
         done,
@@ -469,8 +469,7 @@ class FQLVLAPolicy(
         # NOTE: We only want to keep the discrete action part
         # In the buffer we have the full action space (continuous + discrete)
         # We need to split them before concatenating them in the critic forward
-        # TODO: use all chunks
-        actions_discrete: Tensor = actions[:, 0, DISCRETE_DIMENSION_INDEX:].clone()
+        actions_discrete: Tensor = actions[:, DISCRETE_DIMENSION_INDEX:].clone()
         actions_discrete = torch.round(actions_discrete)
         actions_discrete = actions_discrete.long()
 
@@ -515,15 +514,10 @@ class FQLVLAPolicy(
             rewards_discrete = rewards
             # if discrete_penalties is not None:
             #     rewards_discrete = rewards + discrete_penalties
-            # target_discrete_q = (
-            #     rewards_discrete[:, 0]
-            #     + (1 - done[:, 0]) * self.config.discount * target_next_discrete_q
-            # )
-            # Compute target Q-value with Bellman equation
-            rewards_discrete = rewards
-            # if discrete_penalties is not None:
-            #     rewards_discrete = rewards + discrete_penalties
-            target_discrete_q = rewards_discrete + (1 - done) * self.config.discount * target_next_discrete_q
+            target_discrete_q = (
+                rewards_discrete
+                + (1 - done) * self.config.discount * target_next_discrete_q
+            )
 
         # 3- compute predicted qs
         # if self.config.num_discrete_actions is not None:
@@ -580,7 +574,6 @@ class FQLVLAPolicy(
         observation_features: Tensor | None,
         actions: Tensor | None,
         actions_is_pad: Tensor | None,
-
     ) -> Tensor:
 
         bc_flow_loss, _, _ = self.actor_bc_flow(observations, observation_features, actions[:,:,:DISCRETE_DIMENSION_INDEX], actions_is_pad)
@@ -607,15 +600,17 @@ class FQLVLAPolicy(
         target_flow_actions, _, _ = self.actor_bc_flow.sample_actions(observations, observation_features, noises=noises)
         _, _, actor_actions  = self.actor_onestep_flow(observations, observation_features, noises)
 
-        distill_losses = F.mse_loss(input=actor_actions[:,:,:], target=target_flow_actions[:,:,:], reduction="none")
-        # distill_losses = distill_losses * (~actions_is_pad).unsqueeze(-1)
-        distill_losses = distill_losses[:, :, : self.actor_bc_flow.encoder.vla.config.max_action_dim]
-        distill_loss = distill_losses.mean()
+        # distill_losses = F.mse_loss(input=actor_actions[:,:,:], target=target_flow_actions[:,:,:], reduction="none")
+        # # distill_losses = distill_losses * (~actions_is_pad).unsqueeze(-1)
+        # distill_losses = distill_losses[:, :, : self.actor_bc_flow.encoder.vla.config.max_action_dim]
+        # distill_loss = distill_losses.mean()
+        distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
 
         # Q loss.
         actor_actions = actor_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
         actor_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actor_actions})["action"]
-        actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+        # actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+        
 
         # actor_actions = actor_actions[:, 0, :3] # TODO: use all chunks
         # actor_actions = actor_actions * (~actions_is_pad).unsqueeze(-1)
@@ -741,27 +736,34 @@ class FQLVLAPolicy(
         """Initialize shared or separate encoders for actor and critic."""
         self.shared_encoder = self.config.shared_encoder
         self.encoder_critic = SACObservationEncoder(self.config, self.normalize_inputs)
+        self.encoder_discrete_critic = (
+            self.encoder_critic
+            if self.shared_encoder
+            else SACObservationEncoder(self.config, self.normalize_inputs)
+        )
 
         cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
         # cfg_policy.n_obs_steps: int = 1
         cfg_policy.chunk_size: int = 10
         cfg_policy.n_action_steps: int = 10
+        # cfg_policy.train_state_proj: bool = False
 
         cfg_policy.normalization_mapping = {
             "VISUAL": NormalizationMode.IDENTITY,
             "STATE": NormalizationMode.MIN_MAX,
             # "ENV": NormalizationMode.MIN_MAX,
             "ACTION": NormalizationMode.MIN_MAX,
+            # "ACTION": NormalizationMode.MEAN_STD,
         }
         kwargs = {}
-        kwargs["pretrained_name_or_path"] = "lerobot/smolvla_base"
+        # kwargs["pretrained_name_or_path"] = "lerobot/smolvla_base"
 
         from lerobot.configs.train import TrainRLServerPipelineConfig
         from lerobot.datasets.factory import make_dataset
 
         cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
         cfg.policy.chunk_size = 10
-        # offline_dataset = make_dataset(cfg)
+        offline_dataset = make_dataset(cfg)
         # for k in ["min", "max", "mean", "std"]:
         #     offline_dataset.meta.stats["action"][k] = offline_dataset.meta.stats["action"][k][:-1]
         # kwargs["dataset_stats"] = offline_dataset.meta.stats
@@ -785,10 +787,12 @@ class FQLVLAPolicy(
             )
         # self.vlm.model.text_model.layers = self.vlm.model.text_model.layers[:cfg_policy.num_vlm_layers]
 
-        self.encoder_actor_bc_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(vlm=self.vlm, **kwargs))
-        self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(vlm=self.vlm, **kwargs))
+        # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy(vlm=self.vlm, **kwargs))
+        self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
+        self.encoder_actor_bc_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
+        
 
-        self.encoder_discrrete_actor = (
+        self.encoder_discrete_actor = (
             self.encoder_critic
             if self.shared_encoder
             else SACObservationEncoder(self.config, self.normalize_inputs)
@@ -840,25 +844,25 @@ class FQLVLAPolicy(
         """Build discrete discrete critic ensemble and target networks."""
         heads = [
             DiscreteCriticHead(
-                input_dim=self.encoder_critic.output_dim,
+                input_dim=self.encoder_discrete_critic.output_dim,
                 output_dim=self.config.num_discrete_actions,
                 **asdict(self.config.discrete_critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
         ]
         self.discrete_critic = DiscreteCriticEnsemble(
-            encoder=self.encoder_critic, ensemble=heads
+            encoder=self.encoder_discrete_critic, ensemble=heads
         )
         target_heads = [
             DiscreteCriticHead(
-                input_dim=self.encoder_critic.output_dim,
+                input_dim=self.encoder_discrete_critic.output_dim,
                 output_dim=self.config.num_discrete_actions,
                 **asdict(self.config.discrete_critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
         ]
         self.discrete_critic_target = DiscreteCriticEnsemble(
-            encoder=self.encoder_critic, ensemble=target_heads
+            encoder=self.encoder_discrete_critic, ensemble=target_heads
         )
 
         # TODO: (maractingi, azouitine) Compile the discrete critic
@@ -905,9 +909,9 @@ class FQLVLAPolicy(
 
     def _init_discrete_actor(self):
         self.discrete_actor = DiscretePolicy(
-            encoder=self.encoder_discrrete_actor,
+            encoder=self.encoder_discrete_actor,
             network=MLP(
-                input_dim=self.encoder_discrrete_actor.output_dim,
+                input_dim=self.encoder_discrete_actor.output_dim,
                 **asdict(self.config.discrete_actor_network_kwargs),
             ),
             action_dim=self.config.num_discrete_actions,
@@ -935,7 +939,7 @@ class SACObservationEncoderVLA(nn.Module):
         batch = self.vla._prepare_batch(obs)
         images, img_masks = self.vla.prepare_images(batch)
         state = self.vla.prepare_state(batch)
-        batch["task"] = "pick the cube and lift it up."
+        batch["task"] = "pick up the pink cube"
         lang_tokens, lang_masks = self.vla.prepare_language(batch)
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.vla.model.embed_prefix(images, img_masks, lang_tokens, lang_masks, state=state)
 
@@ -1522,7 +1526,7 @@ class ActorVectorFieldPolicyVLA(nn.Module):
         # bsize = state.shape[0]
 
         observations_with_task = {
-            "task": "pick up the cube",
+            "task": "pick up the pink cube",
             "action": actions,  # Assuming actions are part of the observations
             "actions_is_pad": actions_is_pad,
             **observations,
@@ -1558,7 +1562,7 @@ class ActorVectorFieldPolicyVLA(nn.Module):
         # bsize = state.shape[0]
 
         observations_with_task = {
-            "task": "pick up the cube",
+            "task": "pick up the pink cube",
             **observations,
         }
 
@@ -1568,6 +1572,8 @@ class ActorVectorFieldPolicyVLA(nn.Module):
         lang_tokens, lang_masks = self.encoder.vla.prepare_language(batch)
 
         actions = self.encoder.vla.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state, noise=noises)
+
+        # actions = torch.clamp(actions, -1.0, 1.0)
   
         return actions, None, None  # Return None for log_probs and means as they are not used in this context
 
@@ -1637,7 +1643,7 @@ class ActorVectorFieldPolicyVLAOneStep(nn.Module):
         # bsize = state.shape[0]
 
         observations_with_task = {
-            "task": "pick up the cube",
+            "task": "pick up the pink cube",
             **observations,
         }
 
@@ -1655,13 +1661,13 @@ class ActorVectorFieldPolicyVLAOneStep(nn.Module):
             noise = self.encoder.vla.model.sample_noise(actions_shape, device)
         else:
             noise = noises
-        time = self.encoder.vla.model.sample_time(noise.shape[0], noise.device)
+        # time = self.encoder.vla.model.sample_time(noise.shape[0], noise.device)
 
         x_t = noise
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.encoder.vla.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state=state
         )
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.encoder.vla.model.embed_suffix(x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.encoder.vla.model.embed_suffix_notime(x_t)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
