@@ -15,8 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import math
+from collections import deque
 from dataclasses import asdict
 from typing import Callable, Literal
 
@@ -82,6 +82,8 @@ class FQLVLAPolicy(
         self._init_actor_onestep_flow(continuous_action_dim)
         self._init_temperature()
 
+        self.reset()
+
     def get_optim_params(self) -> dict:
         optim_params = {
             "actor_bc_flow": [
@@ -104,8 +106,9 @@ class FQLVLAPolicy(
 
     def reset(self):
         """Reset the policy"""
-        self.actor_bc_flow.encoder.vla.reset()
-        self.actor_onestep_flow.encoder.vla.reset()
+        # self.actor_bc_flow.encoder.vla.reset()
+        # self.actor_onestep_flow.encoder.vla.reset()
+        self._action_queue = deque([], maxlen=self.config.chunk_size)
 
     @torch.no_grad
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
@@ -113,33 +116,79 @@ class FQLVLAPolicy(
         raise NotImplementedError("SACPolicy does not support action chunking. It returns single actions!")
 
     @torch.no_grad()
+    def compute_flow_actions(self, batch: dict[str, Tensor], noises: Tensor) -> Tensor:
+        observations_features = None
+        if self.shared_encoder and self.actor_bc_flow.encoder.has_images:
+            # Cache and normalize image features
+            observations_features = self.actor_bc_flow.encoder.get_cached_image_features(batch, normalize=True)
+        
+        actions = noises
+        flow_steps = self.config.flow_steps
+
+        # Euler method.
+        for i in range(flow_steps):
+            t = torch.full((actions.shape[0], 1), float(i) / flow_steps, device=noises.device)
+            vels, _, _ = self.actor_bc_flow(batch, observations_features, actions, t)
+            actions = actions + vels / flow_steps
+
+        # actions = torch.clamp(actions, -1.0, 1.0)
+
+        return actions 
+
+    @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select action for inference/evaluation"""
 
-        observations_features = None
-        # if self.shared_encoder and self.actor_onestep_flow.encoder.has_images:
-        #     # Cache and normalize image features
-        #     observations_features = self.actor_onestep_flow.encoder.get_cached_image_features(batch, normalize=True)
+        # observations_features = None
+        # # if self.shared_encoder and self.actor_onestep_flow.encoder.has_images:
+        # #     # Cache and normalize image features
+        # #     observations_features = self.actor_onestep_flow.encoder.get_cached_image_features(batch, normalize=True)
 
-        batch_with_task = {
-            "task": "pick up the pink cube",
-            **batch,
-        }
+        # batch_with_task = {
+        #     "task": "pick up the pink cube",
+        #     **batch,
+        # }
 
-        # actions = self.actor_bc_flow.encoder.vla.select_action(batch_with_task)
-        # actions = self.actor_onestep_flow.encoder.vla.select_action(batch_with_task)
+        # # actions = self.actor_bc_flow.encoder.vla.select_action(batch_with_task)
+        # # actions = self.actor_onestep_flow.encoder.vla.select_action(batch_with_task)
 
-        actions = self.actor_onestep_flow.encoder.vla.select_action_onestep(batch_with_task)
-        actions = torch.clamp(actions, -1.0, 1.0)
-        
-        # _, _, actions = self.actor_onestep_flow(batch_with_task, observations_features)
-        # # Unpad actions
-        # original_action_dim = self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]
-        # actions = actions[:, :, :original_action_dim]
-        # actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actions})["action"]
-        # actions = actions[:, 0, :]  # Use only the continuous action part
-
+        # actions = self.actor_onestep_flow.encoder.vla.select_action_onestep(batch_with_task)
         # actions = torch.clamp(actions, -1.0, 1.0)
+        
+        # # _, _, actions = self.actor_onestep_flow(batch_with_task, observations_features)
+        # # # Unpad actions
+        # # original_action_dim = self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]
+        # # actions = actions[:, :, :original_action_dim]
+        # # actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actions})["action"]
+        # # actions = actions[:, 0, :]  # Use only the continuous action part
+
+        # # actions = torch.clamp(actions, -1.0, 1.0)
+
+        observations_features = None
+        if self.shared_encoder and self.actor_onestep_flow.encoder.has_images:
+            # Cache and normalize image features
+            observations_features = self.actor_onestep_flow.encoder.get_cached_image_features(batch, normalize=True)
+
+        # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
+        # querying the policy.
+        if len(self._action_queue) == 0:
+
+            # batch_shape = list(observations[list(observations.keys())[0]].shape[:-1])
+            batch_shape = batch['observation.state'].shape[0]
+            action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+            device = batch['observation.state'].device
+
+            noises = torch.randn(batch_shape, action_dim, device=device)
+
+            actions, _, _ = self.actor_onestep_flow(batch, observations_features, noises)
+            actions = torch.clamp(actions, -1.0, 1.0)
+
+            actions = actions.reshape(batch_shape, -1, 3)
+
+            self._action_queue.extend(actions.transpose(0, 1))
+
+        
+        actions = self._action_queue.popleft()
 
         if self.config.num_discrete_actions is not None:
             discrete_action, _, _ = self.discrete_actor(batch, observations_features)
@@ -354,20 +403,25 @@ class FQLVLAPolicy(
         next_observation_features: Tensor | None = None,
     ) -> Tensor:
         with torch.no_grad():
+            
+            # _, _, next_actions = self.actor_onestep_flow(next_observations, next_observation_features)
 
-            _, _, next_actions = self.actor_onestep_flow(next_observations, next_observation_features)
-            next_actions = next_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
-            next_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": next_actions})["action"]
-            # next_actions = torch.clamp(next_actions, -1.0, 1.0)
-            
+            batch_shape = next_observations['observation.state'].shape[0]
+            action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+            noises = torch.randn(batch_shape, action_dim, device=next_observations['observation.state'].device)
+            next_actions, _, _ = self.actor_onestep_flow(next_observations, next_observation_features, noises)
+
+            # next_actions = next_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
+            # next_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": next_actions})["action"]
             # next_actions = self.select_action(next_observations)
-            
+            # next_actions = torch.clamp(next_actions, -1.0, 1.0)
+
 
             # next_actions = next_actions[:, 0, :3] # TODO: use all chunks
             # next_actions = next_actions * (~actions_is_pad).unsqueeze(-1)
-            next_actions = next_actions[:, :, :3].reshape(
-                next_actions.shape[0], -1
-            ) # [32, 150]
+            # next_actions = next_actions[:, :, :3].reshape(
+            #     next_actions.shape[0], -1
+            # ) # [32, 150]
 
             # last_next_observations = {key: val[:, -1] for key, val in next_observations.items()}
 
@@ -578,6 +632,26 @@ class FQLVLAPolicy(
 
         bc_flow_loss, _, _ = self.actor_bc_flow(observations, observation_features, actions[:,:,:DISCRETE_DIMENSION_INDEX], actions_is_pad)
 
+        # batch_size = actions.shape[0]
+        # # action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+        # action_dim = self.actor_bc_flow.action_dim
+
+        # # BC flow loss.
+        # x_0 = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
+        # x_1 = actions[:, :,:-1] if self.config.num_discrete_actions is not None else actions
+        # x_1 = x_1.reshape(batch_size, -1)  # Flatten the action dimension
+        # t = torch.rand(batch_size, 1, device=observations['observation.state'].device)
+        # x_t = (1 - t) * x_0 + t * x_1
+        # vel = x_1 - x_0
+        # vel = vel.reshape(batch_size, actions_is_pad.shape[1], -1)  # Reshape to match action dimensions
+
+        # vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
+        # vel_pred = vel_pred.reshape(batch_size, actions_is_pad.shape[1], -1)
+
+        # bc_flow_loss = F.mse_loss(input=vel_pred, target=vel, reduction="none") # (128, 10, 3)
+        # bc_flow_loss = bc_flow_loss * (~actions_is_pad).unsqueeze(-1)
+        # bc_flow_loss = bc_flow_loss.mean()
+
         info = {}
 
         return bc_flow_loss, info
@@ -590,33 +664,56 @@ class FQLVLAPolicy(
         actions_is_pad: Tensor | None,
     ) -> Tensor:
         batch_size = actions.shape[0]
-        action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+        # action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+        action_dim = self.actor_bc_flow.action_dim
+
 
         # Distillation loss.        
         # noises = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
         with torch.no_grad():
             noises = self.actor_bc_flow.encoder.vla.model.sample_noise((batch_size, self.actor_bc_flow.encoder.vla.model.config.chunk_size, self.actor_bc_flow.encoder.vla.model.config.max_action_dim), device=observations['observation.state'].device)
+            # noises = self.actor_onestep_flow.encoder.vla.model.sample_noise((batch_size, self.actor_onestep_flow.encoder.vla.model.config.chunk_size, self.actor_onestep_flow.encoder.vla.model.config.max_action_dim), device=observations['observation.state'].device)
+            # noises = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
         # target_flow_actions = self.compute_flow_actions(observations, noises)
+        # target_flow_actions = self.compute_flow_actions(observations, noises[:, :, :3].reshape(batch_size, -1))
+        # target_flow_actions = target_flow_actions.reshape(
+        #     target_flow_actions.shape[0], self.actor_onestep_flow.encoder.vla.model.config.chunk_size, -1
+        # )
+        # target_flow_actions = pad_vector(
+        #     target_flow_actions, self.actor_onestep_flow.encoder.vla.model.config.max_action_dim
+        # )
         target_flow_actions, _, _ = self.actor_bc_flow.sample_actions(observations, observation_features, noises=noises)
-        _, _, actor_actions  = self.actor_onestep_flow(observations, observation_features, noises)
+        # target_flow_actions = torch.clamp(target_flow_actions, -1.0, 1.0)
+        target_flow_actions = target_flow_actions[:, :, :3].reshape( target_flow_actions.shape[0], -1 )
+
+        # _, _, actor_actions  = self.actor_onestep_flow(observations, observation_features, noises)
+        actor_actions, _, _  = self.actor_onestep_flow(observations, observation_features, noises[:,:,:3].reshape(batch_size, -1))
 
         # distill_losses = F.mse_loss(input=actor_actions[:,:,:], target=target_flow_actions[:,:,:], reduction="none")
         # # distill_losses = distill_losses * (~actions_is_pad).unsqueeze(-1)
         # distill_losses = distill_losses[:, :, : self.actor_bc_flow.encoder.vla.config.max_action_dim]
         # distill_loss = distill_losses.mean()
+
         distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
 
+        # self.actor_onestep_flow.encoder.vla.normalize_targets({"action": actions[:,:,:3]})
+        # self.actor_onestep_flow.encoder.vla.normalize_targets({"action": actions[[0],:,:3]})
+        # self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actions[[0],:,:3]})
+        
+
         # Q loss.
-        actor_actions = actor_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
-        actor_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actor_actions})["action"]
+        # actor_actions = actor_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
+        # actor_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": actor_actions})["action"]
         # actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+
+
         
 
         # actor_actions = actor_actions[:, 0, :3] # TODO: use all chunks
         # actor_actions = actor_actions * (~actions_is_pad).unsqueeze(-1)
-        actor_actions = actor_actions[:, :, :3].reshape(
-            actor_actions.shape[0], -1
-        ) # [32, 150]
+        # actor_actions = actor_actions[:, :, :3].reshape(
+        #     actor_actions.shape[0], -1
+        # ) # [32, 150]
         
         q_preds = self.critic_forward(
             observations=observations,
@@ -641,7 +738,9 @@ class FQLVLAPolicy(
             "distill_loss": distill_loss,
             "q": torch.mean(min_q_preds),
         }
+
         return actor_onestep_flow_loss, info
+
 
     # def compute_loss_actor(
     #     self,
@@ -744,16 +843,16 @@ class FQLVLAPolicy(
 
         cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
         # cfg_policy.n_obs_steps: int = 1
-        cfg_policy.chunk_size: int = 10
-        cfg_policy.n_action_steps: int = 10
+        cfg_policy.chunk_size: int = self.config.chunk_size
+        cfg_policy.n_action_steps: int = 20
         # cfg_policy.train_state_proj: bool = False
 
         cfg_policy.normalization_mapping = {
             "VISUAL": NormalizationMode.IDENTITY,
             "STATE": NormalizationMode.MIN_MAX,
             # "ENV": NormalizationMode.MIN_MAX,
-            "ACTION": NormalizationMode.MIN_MAX,
-            # "ACTION": NormalizationMode.MEAN_STD,
+            # "ACTION": NormalizationMode.MIN_MAX,
+            "ACTION": NormalizationMode.MEAN_STD,
         }
         kwargs = {}
         # kwargs["pretrained_name_or_path"] = "lerobot/smolvla_base"
@@ -762,7 +861,7 @@ class FQLVLAPolicy(
         from lerobot.datasets.factory import make_dataset
 
         cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
-        cfg.policy.chunk_size = 10
+        cfg.policy.chunk_size = self.config.chunk_size
         offline_dataset = make_dataset(cfg)
         # for k in ["min", "max", "mean", "std"]:
         #     offline_dataset.meta.stats["action"][k] = offline_dataset.meta.stats["action"][k][:-1]
@@ -788,9 +887,19 @@ class FQLVLAPolicy(
         # self.vlm.model.text_model.layers = self.vlm.model.text_model.layers[:cfg_policy.num_vlm_layers]
 
         # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy(vlm=self.vlm, **kwargs))
-        self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
+        # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
         self.encoder_actor_bc_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
-        
+
+        # self.encoder_actor_bc_flow = (
+        #     self.encoder_critic
+        #     if self.shared_encoder
+        #     else SACObservationEncoder(self.config, self.normalize_inputs)
+        # )
+        self.encoder_actor_onestep_flow = (
+            self.encoder_critic
+            if self.shared_encoder
+            else SACObservationEncoder(self.config, self.normalize_inputs)
+        )
 
         self.encoder_discrete_actor = (
             self.encoder_critic
@@ -884,6 +993,15 @@ class FQLVLAPolicy(
             **asdict(self.config.policy_kwargs),
         )
 
+        # params = asdict(self.config.actor_network_kwargs)
+        # self.actor_bc_flow = ActorVectorFieldPolicy(
+        #     encoder=self.encoder_actor_bc_flow,
+        #     network=MLP(input_dim=self.encoder_actor_bc_flow.output_dim + continuous_action_dim *self.config.chunk_size + 1, **params),
+        #     action_dim=continuous_action_dim * self.config.chunk_size,
+        #     encoder_is_shared=self.shared_encoder,
+        #     **asdict(self.config.policy_kwargs),
+        # )
+
         self.target_entropy = self.config.target_entropy
         if self.target_entropy is None:
             dim = (self.config.num_discrete_actions if self.config.num_discrete_actions is not None else 0)
@@ -895,17 +1013,24 @@ class FQLVLAPolicy(
     def _init_actor_onestep_flow(self, continuous_action_dim):
         """Initialize policy actor network and default target entropy."""
         # NOTE: The actor select only the continuous action part
-        # params = asdict(self.config.actor_network_kwargs)
-        # action_out_proj = copy.deepcopy(self.encoder_actor_onestep_flow.vla.model.action_out_proj)
-        self.actor_onestep_flow = ActorVectorFieldPolicyVLAOneStep(
+        params = asdict(self.config.actor_network_kwargs)
+        self.actor_onestep_flow = ActorVectorFieldPolicy(
             encoder=self.encoder_actor_onestep_flow,
-            # network=MLP(input_dim=self.encoder_actor_onestep_flow.output_dim + continuous_action_dim, **params),
-            # network=MLP(input_dim=720, **params),
-            # network=action_out_proj,
-            action_dim=continuous_action_dim,
+            network=MLP(input_dim=self.encoder_actor_onestep_flow.output_dim + continuous_action_dim *self.config.chunk_size, **params),
+            action_dim=continuous_action_dim*self.config.chunk_size,
             encoder_is_shared=self.shared_encoder,
             **asdict(self.config.policy_kwargs),
         )
+        # action_out_proj = copy.deepcopy(self.encoder_actor_onestep_flow.vla.model.action_out_proj)
+        # self.actor_onestep_flow = ActorVectorFieldPolicyVLAOneStep(
+        #     encoder=self.encoder_actor_onestep_flow,
+        #     # network=MLP(input_dim=self.encoder_actor_onestep_flow.output_dim + continuous_action_dim, **params),
+        #     # network=MLP(input_dim=720, **params),
+        #     # network=action_out_proj,
+        #     action_dim=continuous_action_dim,
+        #     encoder_is_shared=self.shared_encoder,
+        #     **asdict(self.config.policy_kwargs),
+        # )
 
     def _init_discrete_actor(self):
         self.discrete_actor = DiscretePolicy(
@@ -1459,6 +1584,73 @@ class DiscreteCriticEnsemble(nn.Module):
 #                 return self.encoder(observations)
 #         return observations
 
+class ActorVectorFieldPolicy(nn.Module):
+    """
+    Actor vector field network for flow matching.
+
+    Args:
+        hidden_dims (list[int]): Hidden layer dimensions.
+        action_dim (int): Action dimension.
+        layer_norm (bool): Whether to apply layer normalization.
+        encoder (nn.Module, optional): Optional encoder module to encode the inputs.
+    """
+
+    def __init__(
+        self,
+        encoder: SACObservationEncoder,
+        network: nn.Module,
+        action_dim: int,
+        init_final: float | None = None,
+        encoder_is_shared: bool = False,
+    ):
+        super().__init__()
+        self.encoder: SACObservationEncoder = encoder
+        self.network = network
+        self.action_dim = action_dim
+        self.encoder_is_shared = encoder_is_shared
+
+        # Find the last Linear layer's output dimension
+        for layer in reversed(network.net):
+            if isinstance(layer, nn.Linear):
+                out_features = layer.out_features
+                break
+
+        self.output_layer = nn.Linear(out_features, action_dim)
+        if init_final is not None:
+            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+        else:
+            orthogonal_init()(self.output_layer.weight)
+            # nn.init.zeros_(self.output_layer.bias)
+
+    def forward(
+        self,
+        observations: torch.Tensor,
+        observation_features: torch.Tensor | None,
+        actions: torch.Tensor,
+        times: torch.Tensor = None,
+        # is_encoded: bool = False,
+    ) -> torch.Tensor:
+        """
+        Return the vectors at the given states, actions, and times (optional).
+
+        Args:
+            observations (Tensor): Observations.
+            actions (Tensor): Actions.
+            times (Tensor, optional): Times.
+            is_encoded (bool): Whether the observations are already encoded.
+        """
+        # if not is_encoded and self.encoder is not None:
+        #     observations = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+        obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+        inputs = [obs_enc, actions]
+        if times is not None:
+            inputs.append(times)
+        x = torch.cat(inputs, dim=-1)
+
+        # Get network outputs
+        outputs = self.output_layer(self.network(x))
+        return outputs, None, None  # Return None for log_probs and means as they are not used in this context
 
 class ActorVectorFieldPolicyVLA(nn.Module):
     """
