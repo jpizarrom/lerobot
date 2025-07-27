@@ -110,16 +110,26 @@ class FQLPolicy(
         
         actions = noises
         flow_steps = self.config.flow_steps
+        dt = 1.0 / flow_steps
 
         # Euler method.
         for i in range(flow_steps):
-            t = torch.full((actions.shape[0], 1), float(i) / flow_steps, device=noises.device)
+            t_val = float(i) / flow_steps
+            t = torch.full((actions.shape[0], 1), t_val, device=noises.device)
             vels, _, _ = self.actor_bc_flow(batch, observations_features, actions, t)
             actions = actions + vels / flow_steps
 
-        actions = torch.clamp(actions, -1.0, 1.0)
+        # actions, discrete_logits = torch.split(actions, [30, 30], dim=-1)
+        actions = actions.reshape(actions.shape[0], -1, 4)  # Reshape to match action dimensions
+        continuous_actions = actions[:, :, :3]
+        discrete_actions = actions[:, :, 3:]
+        continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
+        discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
+        actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
+        actions = actions.reshape(actions.shape[0], -1)  # Flatten the action dimension
+        # actions = torch.clamp(actions, -1.0, 1.0)
 
-        return actions 
+        return actions
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -140,22 +150,26 @@ class FQLPolicy(
             device = batch['observation.state'].device
 
             noises = torch.randn(batch_shape, action_dim, device=device)
-
             actions, _, _ = self.actor_onestep_flow(batch, observations_features, noises)
-            actions = torch.clamp(actions, -1.0, 1.0)
 
-            actions = actions.reshape(batch_shape, -1, 3)
+            actions = actions.reshape(batch_shape, -1, 4)
+            continuous_actions = actions[:, :, :3]
+            discrete_actions = actions[:, :, 3:]
+            continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
+            discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
+            actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
+            # actions = actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
 
             self._action_queue.extend(actions.transpose(0, 1))
 
         
         actions = self._action_queue.popleft()
 
-        if self.config.num_discrete_actions is not None:
-            discrete_action, _, _ = self.discrete_actor(batch, observations_features)
-            # discrete_action_value = self.discrete_critic(batch, observations_features)
-            # discrete_action = torch.argmax(discrete_action_value, dim=-1, keepdim=True)
-            actions = torch.cat([actions, discrete_action.unsqueeze(-1)], dim=-1)
+        # if self.config.num_discrete_actions is not None:
+        #     discrete_action, _, _ = self.discrete_actor(batch, observations_features)
+        #     # discrete_action_value = self.discrete_critic(batch, observations_features)
+        #     # discrete_action = torch.argmax(discrete_action_value, dim=-1, keepdim=True)
+        #     actions = torch.cat([actions, discrete_action.unsqueeze(-1)], dim=-1)
 
         return actions
 
@@ -182,7 +196,11 @@ class FQLPolicy(
         return q_values
 
     def discrete_critic_forward(
-        self, observations, use_target=False, observation_features=None
+        self,
+        observations,
+        actions: Tensor,
+        use_target=False,
+        observation_features=None
     ) -> torch.Tensor:
         """Forward pass through a discrete critic network
 
@@ -195,7 +213,7 @@ class FQLPolicy(
             Tensor of Q-values from the discrete critic network
         """
         discrete_critic = self.discrete_critic_target if use_target else self.discrete_critic
-        q_values = discrete_critic(observations, observation_features)
+        q_values = discrete_critic(observations, actions, observation_features)
         return q_values
 
     def forward(
@@ -247,24 +265,24 @@ class FQLPolicy(
 
             return {"loss_critic": loss_critic, "info": info}
 
-        if model == "discrete_critic" and self.config.num_discrete_actions is not None:
-            # Extract critic-specific components
-            rewards: Tensor = batch["reward"]
-            next_observations: dict[str, Tensor] = batch["next_state"]
-            done: Tensor = batch["done"]
-            next_observation_features: Tensor = batch.get("next_observation_feature")
-            complementary_info = batch.get("complementary_info")
-            loss_discrete_critic, info = self.compute_loss_discrete_critic(
-                observations=observations,
-                actions=actions[:, 0],
-                rewards=rewards,
-                next_observations=next_observations,
-                done=done,
-                observation_features=observation_features,
-                next_observation_features=next_observation_features,
-                complementary_info=complementary_info,
-            )
-            return {"loss_discrete_critic": loss_discrete_critic, "info": info}
+        # if model == "discrete_critic" and self.config.num_discrete_actions is not None:
+        #     # Extract critic-specific components
+        #     rewards: Tensor = batch["reward"]
+        #     next_observations: dict[str, Tensor] = batch["next_state"]
+        #     done: Tensor = batch["done"]
+        #     next_observation_features: Tensor = batch.get("next_observation_feature")
+        #     complementary_info = batch.get("complementary_info")
+        #     loss_discrete_critic, info = self.compute_loss_discrete_critic(
+        #         observations=observations,
+        #         actions=actions[:, 0],
+        #         rewards=rewards,
+        #         next_observations=next_observations,
+        #         done=done,
+        #         observation_features=observation_features,
+        #         next_observation_features=next_observation_features,
+        #         complementary_info=complementary_info,
+        #     )
+        #     return {"loss_discrete_critic": loss_discrete_critic, "info": info}
         # if model == "actor":
         #     return {
         #         "loss_actor": self.compute_loss_actor(
@@ -290,15 +308,15 @@ class FQLPolicy(
                 )
             return {"loss_actor_onestep_flow": loss_actor_onestep_flow, "info": info}
 
-        if model == "discrete_actor":
-            if self.config.num_discrete_actions is None:
-                raise ValueError("Discrete actor is not configured for this policy.")
+        # if model == "discrete_actor":
+        #     if self.config.num_discrete_actions is None:
+        #         raise ValueError("Discrete actor is not configured for this policy.")
 
-            loss_discrete_actor, info = self.compute_loss_discrete_actor(
-                observations=observations,
-                observation_features=observation_features,
-            )
-            return {"loss_discrete_actor": loss_discrete_actor, "info": info}
+        #     loss_discrete_actor, info = self.compute_loss_discrete_actor(
+        #         observations=observations,
+        #         observation_features=observation_features,
+        #     )
+        #     return {"loss_discrete_actor": loss_discrete_actor, "info": info}
 
         if model == "temperature":
             return {
@@ -321,16 +339,16 @@ class FQLPolicy(
                 param.data * self.config.critic_target_update_weight
                 + target_param.data * (1.0 - self.config.critic_target_update_weight)
             )
-        if self.config.num_discrete_actions is not None:
-            for target_param, param in zip(
-                self.discrete_critic_target.parameters(),
-                self.discrete_critic.parameters(),
-                strict=True,
-            ):
-                target_param.data.copy_(
-                    param.data * self.config.critic_target_update_weight
-                    + target_param.data * (1.0 - self.config.critic_target_update_weight)
-                )
+        # if self.config.num_discrete_actions is not None:
+        #     for target_param, param in zip(
+        #         self.discrete_critic_target.parameters(),
+        #         self.discrete_critic.parameters(),
+        #         strict=True,
+        #     ):
+        #         target_param.data.copy_(
+        #             param.data * self.config.critic_target_update_weight
+        #             + target_param.data * (1.0 - self.config.critic_target_update_weight)
+        #         )
 
     def update_temperature(self):
         self.temperature = self.log_alpha.exp().item()
@@ -347,16 +365,22 @@ class FQLPolicy(
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
     ) -> Tensor:
+
         with torch.no_grad():
-            # next_actions = self.sample_actions(batch['next_observations'], seed=sample_rng)
-            # next_action_preds = self.select_action(next_observations)
             batch_shape = next_observations['observation.state'].shape[0]
             action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
             
             noises = torch.randn(batch_shape, action_dim, device=next_observations['observation.state'].device)
             next_actions, _, _ = self.actor_onestep_flow(next_observations, next_observation_features, noises)
             # next_actions = self.select_action(next_observations)
-            next_actions = torch.clamp(next_actions, -1.0, 1.0)
+            
+            next_actions = next_actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
+            continuous_actions = next_actions[:, :, :DISCRETE_DIMENSION_INDEX]
+            discrete_actions = next_actions[:, :, DISCRETE_DIMENSION_INDEX:]
+            continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
+            discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
+            next_actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
+            next_actions = next_actions.reshape(batch_shape, -1)  # Flatten the action dimension
 
             # 2- compute q targets
             next_qs = self.critic_forward(
@@ -369,9 +393,13 @@ class FQLPolicy(
             # subsample critics to prevent overfitting if use high UTD (update to date)
             # TODO: Get indices before forward pass to avoid unnecessary computation
             if self.config.num_subsample_critics is not None:
-                indices = torch.randperm(self.config.num_critics)
-                indices = indices[: self.config.num_subsample_critics]
-                next_qs = next_qs[indices]
+                raise NotImplementedError(
+                    "Subsampling critics is not implemented yet. "
+                    "Please set num_subsample_critics to None or implement the subsampling logic."
+                )
+                # indices = torch.randperm(self.config.num_critics)
+                # indices = indices[: self.config.num_subsample_critics]
+                # next_qs = next_qs[indices]
 
             # critics subsample size
             if self.config.q_agg == 'min':
@@ -386,15 +414,15 @@ class FQLPolicy(
             # td_target = rewards + (1 - done) * self.config.discount * next_q
 
         # 3- compute predicted qs
-        if self.config.num_discrete_actions is not None:
-            # NOTE: We only want to keep the continuous action part
-            # In the buffer we have the full action space (continuous + discrete)
-            # We need to split them before concatenating them in the critic forward
-            actions: Tensor = actions[:, : ,:DISCRETE_DIMENSION_INDEX]
+        # if self.config.num_discrete_actions is not None:
+        #     # NOTE: We only want to keep the continuous action part
+        #     # In the buffer we have the full action space (continuous + discrete)
+        #     # We need to split them before concatenating them in the critic forward
+        #     actions: Tensor = actions[:, : ,:DISCRETE_DIMENSION_INDEX]
 
         # actions = actions[:, 0, :3] # TODO: use all chunks
         # actions = actions * (~actions_is_pad).unsqueeze(-1)
-        actions = actions[:, :, :3].reshape(
+        actions = actions[:, :, :].reshape(
             actions.shape[0], -1
         ) # [32, 150]
         
@@ -417,128 +445,18 @@ class FQLPolicy(
             ).mean(dim=1)
         ).sum()
 
-        # critics_loss = F.mse_loss(input=q_preds, target=td_target_duplicate)
-
         info = {
-            # "critic_loss": critic_loss,
+            "critic_loss": critics_loss,
             "predicted_qs": torch.mean(q_preds),
             "target_qs": torch.mean(td_target_duplicate),
             "rewards": rewards.mean(),
+            # "discrete_critic_loss": discrete_critic_loss,
+            # "discrete_predicted_qs": torch.mean(predicted_discrete_qs),
+            # "discrete_target_qs": torch.mean(target_discrete_q_duplicate),
+            # "discrete_rewards": rewards_discrete.mean(),
         }
         
         return critics_loss, info
-
-    def compute_loss_discrete_critic(
-        self,
-        observations,
-        actions,
-        rewards,
-        next_observations,
-        done,
-        observation_features=None,
-        next_observation_features=None,
-        complementary_info=None,
-    ):
-        # NOTE: We only want to keep the discrete action part
-        # In the buffer we have the full action space (continuous + discrete)
-        # We need to split them before concatenating them in the critic forward
-        actions_discrete: Tensor = actions[:, DISCRETE_DIMENSION_INDEX:].clone()
-        actions_discrete = torch.round(actions_discrete)
-        actions_discrete = actions_discrete.long()
-
-        with torch.no_grad():
-            # action, log_prob, action_probs
-            _, next_log_probs, next_action_probs = self.discrete_actor(
-                next_observations, next_observation_features
-            )
-            # next_action_preds [228]
-            # next_state_action_probs [228, 3]
-            # best_next_discrete_action [228, 3]
-
-            # Get target Q-values from target network
-            target_next_discrete_qs = self.discrete_critic_forward(
-                observations=next_observations,
-                # actions=next_action_preds,
-                use_target=True,
-                observation_features=next_observation_features,
-            )  # [2, 228, 3]
-
-            # critics subsample size
-            target_next_discrete_q, _ = target_next_discrete_qs.min(
-                dim=0
-            )  # Get values from min operation
-            if self.config.use_backup_entropy:
-                target_next_discrete_q = target_next_discrete_q - (
-                    self.temperature * next_log_probs
-                )
-
-            target_next_discrete_q = target_next_discrete_q * next_action_probs
-
-            # adapt Q-target for discrete Q-function
-            target_next_discrete_q = target_next_discrete_q.sum(dim=1)
-
-            # # Use gather to select Q-values for best actions
-            # target_next_discrete_q = torch.gather(
-            #     target_next_discrete_qs, dim=1, index=next_action_preds.unsqueeze(-1)
-            # ).squeeze(-1)
-
-            # Compute target Q-value with Bellman equation
-            rewards_discrete = rewards
-            # if discrete_penalties is not None:
-            #     rewards_discrete = rewards + discrete_penalties
-            target_discrete_q = (
-                rewards_discrete
-                + (1 - done) * self.config.discount * target_next_discrete_q
-            )
-
-        # 3- compute predicted qs
-        # if self.config.num_discrete_actions is not None:
-        #     # NOTE: We only want to keep the continuous action part
-        #     # In the buffer we have the full action space (continuous + discrete)
-        #     # We need to split them before concatenating them in the critic forward
-        #     actions: Tensor = actions[:, :DISCRETE_DIMENSION_INDEX]
-
-        predicted_discrete_qs = self.discrete_critic_forward(
-            observations=observations,
-            # actions=actions_discrete,
-            use_target=False,
-            observation_features=observation_features,
-        )
-
-        # Use gather to select Q-values for taken actions
-        # Expand actions_discrete to match the critic ensemble dimension
-        actions_discrete_expanded = actions_discrete.unsqueeze(0).expand(predicted_discrete_qs.size(0), -1, -1)
-        predicted_discrete_q = torch.gather(predicted_discrete_qs, dim=2, index=actions_discrete_expanded).squeeze(-1)
-
-        target_discrete_q_expanded = einops.repeat(target_discrete_q, "b -> e b", e=predicted_discrete_qs.shape[0])
-
-        # Compute MSE loss between predicted and target Q-values
-        # discrete_critic_loss = F.mse_loss(
-        #     input=predicted_discrete_q, target=target_discrete_q_expanded
-        # )
-        discrete_critic_loss = (
-            F.mse_loss(
-                input=predicted_discrete_q,
-                target=target_discrete_q_expanded,
-                reduction="none",
-            ).mean(dim=1)
-        ).sum()
-
-        info = {
-            "predicted_qs": torch.mean(predicted_discrete_q),
-            "target_qs": torch.mean(target_discrete_q_expanded),
-            "rewards": rewards_discrete.mean(),
-        }
-
-        return discrete_critic_loss, info
-
-    def compute_loss_temperature(self, observations, observation_features: Tensor | None = None) -> Tensor:
-        """Compute the temperature loss"""
-        # calculate temperature loss
-        with torch.no_grad():
-            _, log_probs, _ = self.discrete_actor(observations, observation_features)
-        temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
-        return temperature_loss
 
     def compute_loss_actor_bc_flow(
         self,
@@ -548,16 +466,16 @@ class FQLPolicy(
         actions_is_pad: Tensor | None,
     ) -> Tensor:
         batch_size = actions.shape[0]
-        action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+        action_dim = self.actor_bc_flow.action_dim # self.config['action_dim']
 
         # BC flow loss.
         x_0 = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
-        x_1 = actions[:, :,:-1] if self.config.num_discrete_actions is not None else actions
+        x_1 = actions#.clone()  # Use the provided actions as x_1
         x_1 = x_1.reshape(batch_size, -1)  # Flatten the action dimension
         t = torch.rand(batch_size, 1, device=observations['observation.state'].device)
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
-        vel = vel.reshape(batch_size, actions_is_pad.shape[1], -1)  # Reshape to match action dimensions
+        vel = vel.reshape(batch_size, -1, 4)  # Reshape to match action dimensions
 
         vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
         vel_pred = vel_pred.reshape(batch_size, actions_is_pad.shape[1], -1)
@@ -566,7 +484,10 @@ class FQLPolicy(
         bc_flow_loss = bc_flow_loss * (~actions_is_pad).unsqueeze(-1)
         bc_flow_loss = bc_flow_loss.mean()
 
-        info = {}
+        info = {
+            # "bc_flow_loss": bc_flow_loss,
+            # "discrete_bc_flow_loss": discrete_bc_flow_loss,
+        }
 
         return bc_flow_loss, info
 
@@ -587,7 +508,16 @@ class FQLPolicy(
         distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
 
         # Q loss.
-        actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+        actor_actions = actor_actions.reshape(batch_size, -1, 4)  # Reshape to match action dimensions
+
+        actor_continuous_actions = actor_actions[:, :, :DISCRETE_DIMENSION_INDEX]
+        actor_discrete_actions = actor_actions[:, :, DISCRETE_DIMENSION_INDEX:]
+        actor_continuous_actions = torch.clamp(actor_continuous_actions, -1.0, 1.0)
+        actor_discrete_actions = torch.clamp(actor_discrete_actions, 0.0, 2.0)
+        actor_actions = torch.cat([actor_continuous_actions, actor_discrete_actions], dim=-1)
+        actor_actions = actor_actions.reshape(batch_size, -1)  # Flatten the action dimension
+        # actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+
         q_preds = self.critic_forward(
             observations=observations,
             actions=actor_actions,
@@ -602,7 +532,6 @@ class FQLPolicy(
             lam = 1.0 / q_preds.abs().mean().detach()
             q_loss = lam * q_loss
 
-        # actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
         actor_onestep_flow_loss = self.config.alpha * distill_loss + q_loss
 
         info = {
@@ -610,85 +539,11 @@ class FQLPolicy(
             "predicted_qs": torch.mean(q_preds),
             "distill_loss": distill_loss,
             "q": torch.mean(min_q_preds),
+            # "discrete_q_loss": discrete_q_loss,
+            # "discrete_predicted_qs": torch.mean(discrete_q_preds),
         }
 
         return actor_onestep_flow_loss, info
-
-
-    # def compute_loss_actor(
-    #     self,
-    #     observations,
-    #     observation_features: Tensor | None,
-    #     actions: Tensor | None,
-    # ) -> Tensor:
-    #     batch_size = actions.shape[0]
-    #     action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
-
-    #     # BC flow loss.
-    #     x_0 = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
-    #     x_1 = actions[:, :-1] if self.config.num_discrete_actions is not None else actions
-    #     t = torch.rand(batch_size, 1, device=observations['observation.state'].device)
-    #     x_t = (1 - t) * x_0 + t * x_1
-    #     vel = x_1 - x_0
-
-    #     vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
-    #     bc_flow_loss = F.mse_loss(input=vel_pred, target=vel)
-
-    #     # Distillation loss.        
-    #     noises = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
-    #     target_flow_actions = self.compute_flow_actions(observations, noises)
-    #     actor_actions, _, _ = self.actor_onestep_flow(observations, observation_features, noises)
-    #     distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
-
-    #     # Q loss.
-    #     actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
-    #     q_preds = self.critic_forward(
-    #         observations=observations,
-    #         actions=actor_actions,
-    #         use_target=False,
-    #         observation_features=observation_features,
-    #     )
-    #     # min_q_preds = q_preds.min(dim=0)[0]
-    #     min_q_preds = q_preds.mean(dim=0, keepdim=True)
-    #     q_loss = -min_q_preds.mean()
-
-    #     if self.config.normalize_q_loss:
-    #         # lam = 1.0 / q_preds.abs().mean().detach()
-    #         lam = 1.0 / (torch.abs(q_preds).mean().detach() + 1e-8)
-    #         q_loss = lam * q_loss
-
-    #     # actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
-    #     actor_loss = bc_flow_loss + self.config.alpha * distill_loss + q_loss
-    #     return actor_loss
-
-    
-    def compute_loss_discrete_actor(
-        self,
-        observations,
-        observation_features: Tensor | None = None,
-    ) -> Tensor:
-        _, log_probs, action_probs = self.discrete_actor(
-            observations, observation_features
-        )
-        # actions_pi [228]
-        # log_probs [228, 3]
-        # action_probs [228, 3]
-
-        q_preds = self.discrete_critic_forward(
-            observations=observations,
-            use_target=False,
-            observation_features=observation_features,
-        )  # [2, 228, 3]
-
-        # min_q_preds = q_preds
-        min_q_preds = q_preds.min(dim=0)[0] # [3]
-        # min_q_preds = torch.gather(q_preds, dim=1, index=actions_pi.unsqueeze(-1))
-
-        actor_loss = (action_probs*((self.temperature * log_probs) - min_q_preds)).mean()
-        return actor_loss, {
-            "q_loss": torch.mean(-min_q_preds),
-            "predicted_qs": torch.mean(q_preds),
-        }
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
@@ -733,7 +588,7 @@ class FQLPolicy(
         """Build critic ensemble, targets, and optional discrete critic."""
         heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim + continuous_action_dim*self.config.chunk_size,
+                input_dim=self.encoder_critic.output_dim + (continuous_action_dim + 1) * self.config.chunk_size,
                 **asdict(self.config.critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -743,7 +598,7 @@ class FQLPolicy(
         )
         target_heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim + continuous_action_dim*self.config.chunk_size,
+                input_dim=self.encoder_critic.output_dim + (continuous_action_dim + 1) * self.config.chunk_size,
                 **asdict(self.config.critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -757,36 +612,8 @@ class FQLPolicy(
             self.critic_ensemble = torch.compile(self.critic_ensemble)
             self.critic_target = torch.compile(self.critic_target)
 
-        if self.config.num_discrete_actions is not None:
-            self._init_discrete_critics()
-
-    def _init_discrete_critics(self):
-        """Build discrete discrete critic ensemble and target networks."""
-        heads = [
-            DiscreteCriticHead(
-                input_dim=self.encoder_discrete_critic.output_dim,
-                output_dim=self.config.num_discrete_actions,
-                **asdict(self.config.discrete_critic_network_kwargs),
-            )
-            for _ in range(self.config.num_critics)
-        ]
-        self.discrete_critic = DiscreteCriticEnsemble(
-            encoder=self.encoder_discrete_critic, ensemble=heads
-        )
-        target_heads = [
-            DiscreteCriticHead(
-                input_dim=self.encoder_discrete_critic.output_dim,
-                output_dim=self.config.num_discrete_actions,
-                **asdict(self.config.discrete_critic_network_kwargs),
-            )
-            for _ in range(self.config.num_critics)
-        ]
-        self.discrete_critic_target = DiscreteCriticEnsemble(
-            encoder=self.encoder_discrete_critic, ensemble=target_heads
-        )
-
-        # TODO: (maractingi, azouitine) Compile the discrete critic
-        self.discrete_critic_target.load_state_dict(self.discrete_critic.state_dict())
+        # if self.config.num_discrete_actions is not None:
+        #     self._init_discrete_critics()
 
     def _init_actor_bc_flow(self, continuous_action_dim):
         """Initialize policy actor network and default target entropy."""
@@ -794,8 +621,9 @@ class FQLPolicy(
         params = asdict(self.config.actor_network_kwargs)
         self.actor_bc_flow = ActorVectorFieldPolicy(
             encoder=self.encoder_actor_bc_flow,
-            network=MLP(input_dim=self.encoder_actor_bc_flow.output_dim + continuous_action_dim *self.config.chunk_size + 1, **params),
-            action_dim=continuous_action_dim * self.config.chunk_size,
+            network=MLP(input_dim=self.encoder_actor_bc_flow.output_dim + (continuous_action_dim + 1) *self.config.chunk_size + 1, **params),
+            action_dim=(continuous_action_dim + 1) * self.config.chunk_size,
+            # num_discrete_actions=self.config.num_discrete_actions* self.config.chunk_size,
             encoder_is_shared=self.shared_encoder,
             **asdict(self.config.policy_kwargs),
         )
@@ -805,8 +633,8 @@ class FQLPolicy(
             dim = (self.config.num_discrete_actions if self.config.num_discrete_actions is not None else 0)
             self.target_entropy = -np.prod(dim) / 2
 
-        if self.config.num_discrete_actions is not None:
-            self._init_discrete_actor()
+        # if self.config.num_discrete_actions is not None:
+        #     self._init_discrete_actor()
 
     def _init_actor_onestep_flow(self, continuous_action_dim):
         """Initialize policy actor network and default target entropy."""
@@ -814,22 +642,11 @@ class FQLPolicy(
         params = asdict(self.config.actor_network_kwargs)
         self.actor_onestep_flow = ActorVectorFieldPolicy(
             encoder=self.encoder_actor_onestep_flow,
-            network=MLP(input_dim=self.encoder_actor_onestep_flow.output_dim + continuous_action_dim *self.config.chunk_size, **params),
-            action_dim=continuous_action_dim*self.config.chunk_size,
+            network=MLP(input_dim=self.encoder_actor_onestep_flow.output_dim + (continuous_action_dim + 1) *self.config.chunk_size, **params),
+            action_dim=(continuous_action_dim + 1) * self.config.chunk_size,
+            # num_discrete_actions=self.config.num_discrete_actions* self.config.chunk_size,
             encoder_is_shared=self.shared_encoder,
             **asdict(self.config.policy_kwargs),
-        )
-
-    def _init_discrete_actor(self):
-        self.discrete_actor = DiscretePolicy(
-            encoder=self.encoder_discrete_actor,
-            network=MLP(
-                input_dim=self.encoder_discrete_actor.output_dim,
-                **asdict(self.config.discrete_actor_network_kwargs),
-            ),
-            action_dim=self.config.num_discrete_actions,
-            encoder_is_shared=self.shared_encoder,
-            **asdict(self.config.discrete_policy_kwargs),
         )
 
     def _init_temperature(self):
@@ -1125,7 +942,7 @@ class CriticEnsemble(nn.Module):
         self,
         encoder: SACObservationEncoder,
         ensemble: list[CriticHead],
-        output_normalization: nn.Module,
+        output_normalization: nn.Module | None,
         init_final: float | None = None,
     ):
         super().__init__()
@@ -1146,7 +963,10 @@ class CriticEnsemble(nn.Module):
         # NOTE: We normalize actions it helps for sample efficiency
         actions: dict[str, torch.tensor] = {"action": actions}
         # NOTE: Normalization layer took dict in input and outputs a dict that why
-        actions = self.output_normalization(actions)["action"]
+        if self.output_normalization is not None:
+            actions = self.output_normalization(actions)["action"]
+        else:
+            actions = actions["action"]
         actions = actions.to(device)
 
         obs_enc = self.encoder(observations, cache=observation_features)
@@ -1416,6 +1236,99 @@ class ActorVectorFieldPolicy(nn.Module):
         # Get network outputs
         outputs = self.output_layer(self.network(x))
         return outputs, None, None  # Return None for log_probs and means as they are not used in this context
+
+class ActorVectorFieldWithDiscretePolicy(nn.Module):
+    """
+    Actor vector field network for flow matching.
+
+    Args:
+        hidden_dims (list[int]): Hidden layer dimensions.
+        action_dim (int): Action dimension.
+        layer_norm (bool): Whether to apply layer normalization.
+        encoder (nn.Module, optional): Optional encoder module to encode the inputs.
+    """
+
+    def __init__(
+        self,
+        encoder: SACObservationEncoder,
+        network: nn.Module,
+        action_dim: int,
+        num_discrete_actions: int,
+        init_final: float | None = None,
+        encoder_is_shared: bool = False,
+    ):
+        super().__init__()
+        self.encoder: SACObservationEncoder = encoder
+        self.network = network
+        self.action_dim = action_dim
+        self.num_discrete_actions = num_discrete_actions
+        self.encoder_is_shared = encoder_is_shared
+        self.embed = nn.Embedding(3, 3)
+
+        # Find the last Linear layer's output dimension
+        for layer in reversed(network.net):
+            if isinstance(layer, nn.Linear):
+                out_features = layer.out_features
+                break
+
+        self.output_layer = nn.Linear(out_features, action_dim)
+        if init_final is not None:
+            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+        else:
+            orthogonal_init()(self.output_layer.weight)
+            # nn.init.zeros_(self.output_layer.bias)
+
+    def forward(
+        self,
+        observations: torch.Tensor,
+        observation_features: torch.Tensor | None,
+        actions: torch.Tensor,
+        times: torch.Tensor = None,
+        # is_encoded: bool = False,
+    ) -> torch.Tensor:
+        """
+        Return the vectors at the given states, actions, and times (optional).
+
+        Args:
+            observations (Tensor): Observations.
+            actions (Tensor): Actions.
+            times (Tensor, optional): Times.
+            is_encoded (bool): Whether the observations are already encoded.
+        """
+        # if not is_encoded and self.encoder is not None:
+        #     observations = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+        obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+        inputs = [obs_enc, actions]
+        # inputs = [obs_enc, actions[:,:30], self.embed(actions[:, 30:].long()).flatten(1,2)]
+        if times is not None:
+            inputs.append(times)
+        x = torch.cat(inputs, dim=-1)
+
+        # Get network outputs
+        outputs = self.output_layer(self.network(x))
+        
+        continuous_outputs = outputs[:, :-self.num_discrete_actions]
+
+        discrete_outputs = outputs[:, -self.num_discrete_actions:]
+
+        discrete_outputs = discrete_outputs.reshape(discrete_outputs.shape[0], -1, 3)
+
+        policy_dist = Categorical(logits=discrete_outputs)
+        discrete_action = policy_dist.sample()
+        # Action probabilities for calculating the adapted soft-Q loss
+        # discrete_action_probs = policy_dist.probs
+        discrete_action_probs = F.softmax(discrete_outputs, dim=1)
+        # discrete_action_probs = torch.clamp(discrete_action_probs, min=1e-6, max=1.0)
+        discrete_log_prob = F.log_softmax(discrete_outputs, dim=1)
+        # discrete_log_prob = torch.clamp(discrete_log_prob, min=-10, max=0)
+
+        discrete_action = discrete_action.reshape(discrete_outputs.shape[0], -1)
+        discrete_log_prob = discrete_log_prob.reshape(discrete_outputs.shape[0], -1)
+        discrete_action_probs = discrete_action_probs.reshape(discrete_outputs.shape[0], -1)
+        discrete_outputs = discrete_outputs.reshape(discrete_outputs.shape[0], -1)
+
+        return continuous_outputs, None, None, discrete_action, discrete_log_prob, discrete_action_probs, discrete_outputs
 
 class DefaultImageEncoder(nn.Module):
     def __init__(self, config: FQLConfig):

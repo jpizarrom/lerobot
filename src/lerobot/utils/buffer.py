@@ -248,7 +248,7 @@ class ReplayBuffer:
         idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
 
         # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
-        self.n_steps = 20
+        self.n_steps = 10
         self.gamma = 0.99
 
         last_valid_index = self.position - 1
