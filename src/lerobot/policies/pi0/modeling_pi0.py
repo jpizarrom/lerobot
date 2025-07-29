@@ -21,6 +21,7 @@
 [Jax code](https://github.com/Physical-Intelligence/openpi)
 
 Designed by Physical Intelligence. Ported from Jax by Hugging Face.
+Disclaimer: It is not expected to perform as well as the original implementation.
 
 Install pi0 extra dependencies:
 ```bash
@@ -87,12 +88,6 @@ def create_sinusoidal_pos_embedding(
     sin_input = scaling_factor[None, :] * time[:, None]
     pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
     return pos_emb
-
-
-def sample_beta(alpha, beta, bsize, device):
-    gamma1 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / alpha)
-    gamma2 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / beta)
-    return gamma1 / (gamma1 + gamma2)
 
 
 def make_att_2d_masks(pad_masks, att_masks):
@@ -259,6 +254,16 @@ class PI0Policy(PreTrainedPolicy):
 
     def get_optim_params(self) -> dict:
         return self.parameters()
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        """Override the from_pretrained method to display important disclaimer."""
+        print(
+            "⚠️  DISCLAIMER: The PI0 model is ported from JAX by the Hugging Face team. \n"
+            "   It is not expected to perform as well as the original implementation. \n"
+            "   Original implementation: https://github.com/Physical-Intelligence/openpi"
+        )
+        return super().from_pretrained(*args, **kwargs)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
@@ -504,9 +509,10 @@ class PI0FlowMatching(nn.Module):
         return noise
 
     def sample_time(self, bsize, device):
-        time_beta = sample_beta(1.5, 1.0, bsize, device)
+        beta_dist = torch.distributions.Beta(concentration1=1.5, concentration0=1.0)
+        time_beta = beta_dist.sample((bsize,)).to(device=device, dtype=torch.float32)
         time = time_beta * 0.999 + 0.001
-        return time.to(dtype=torch.float32, device=device)
+        return time
 
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks
