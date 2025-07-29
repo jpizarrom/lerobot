@@ -369,7 +369,7 @@ class FQLPolicy(
         with torch.no_grad():
             batch_shape = next_observations['observation.state'].shape[0]
             action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
-            
+
             noises = torch.randn(batch_shape, action_dim, device=next_observations['observation.state'].device)
             next_actions, _, _ = self.actor_onestep_flow(next_observations, next_observation_features, noises)
             # next_actions = self.select_action(next_observations)
@@ -578,11 +578,11 @@ class FQLPolicy(
             if self.shared_encoder
             else SACObservationEncoder(self.config, self.normalize_inputs)
         )
-        self.encoder_discrete_actor = (
-            self.encoder_critic
-            if self.shared_encoder
-            else SACObservationEncoder(self.config, self.normalize_inputs)
-        )
+        # self.encoder_discrete_actor = (
+        #     self.encoder_critic
+        #     if self.shared_encoder
+        #     else SACObservationEncoder(self.config, self.normalize_inputs)
+        # )
 
     def _init_critics(self, continuous_action_dim):
         """Build critic ensemble, targets, and optional discrete critic."""
@@ -1082,92 +1082,91 @@ class DiscreteCriticEnsemble(nn.Module):
         return q_values
 
 
-class Policy(nn.Module):
-    def __init__(
-        self,
-        encoder: SACObservationEncoder,
-        network: nn.Module,
-        action_dim: int,
-        std_min: float = -5,
-        std_max: float = 2,
-        fixed_std: torch.Tensor | None = None,
-        init_final: float | None = None,
-        use_tanh_squash: bool = False,
-        encoder_is_shared: bool = False,
-    ):
-        super().__init__()
-        self.encoder: SACObservationEncoder = encoder
-        self.network = network
-        self.action_dim = action_dim
-        self.std_min = std_min
-        self.std_max = std_max
-        self.fixed_std = fixed_std
-        self.use_tanh_squash = use_tanh_squash
-        self.encoder_is_shared = encoder_is_shared
+# class Policy(nn.Module):
+#     def __init__(
+#         self,
+#         encoder: SACObservationEncoder,
+#         network: nn.Module,
+#         action_dim: int,
+#         std_min: float = -5,
+#         std_max: float = 2,
+#         fixed_std: torch.Tensor | None = None,
+#         init_final: float | None = None,
+#         use_tanh_squash: bool = False,
+#         encoder_is_shared: bool = False,
+#     ):
+#         super().__init__()
+#         self.encoder: SACObservationEncoder = encoder
+#         self.network = network
+#         self.action_dim = action_dim
+#         self.std_min = std_min
+#         self.std_max = std_max
+#         self.fixed_std = fixed_std
+#         self.use_tanh_squash = use_tanh_squash
+#         self.encoder_is_shared = encoder_is_shared
 
-        # Find the last Linear layer's output dimension
-        for layer in reversed(network.net):
-            if isinstance(layer, nn.Linear):
-                out_features = layer.out_features
-                break
-        # Mean layer
-        self.mean_layer = nn.Linear(out_features, action_dim)
-        if init_final is not None:
-            nn.init.uniform_(self.mean_layer.weight, -init_final, init_final)
-            nn.init.uniform_(self.mean_layer.bias, -init_final, init_final)
-        else:
-            orthogonal_init()(self.mean_layer.weight)
+#         # Find the last Linear layer's output dimension
+#         for layer in reversed(network.net):
+#             if isinstance(layer, nn.Linear):
+#                 out_features = layer.out_features
+#                 break
+#         # Mean layer
+#         self.mean_layer = nn.Linear(out_features, action_dim)
+#         if init_final is not None:
+#             nn.init.uniform_(self.mean_layer.weight, -init_final, init_final)
+#             nn.init.uniform_(self.mean_layer.bias, -init_final, init_final)
+#         else:
+#             orthogonal_init()(self.mean_layer.weight)
 
-        # Standard deviation layer or parameter
-        if fixed_std is None:
-            self.std_layer = nn.Linear(out_features, action_dim)
-            if init_final is not None:
-                nn.init.uniform_(self.std_layer.weight, -init_final, init_final)
-                nn.init.uniform_(self.std_layer.bias, -init_final, init_final)
-            else:
-                orthogonal_init()(self.std_layer.weight)
+#         # Standard deviation layer or parameter
+#         if fixed_std is None:
+#             self.std_layer = nn.Linear(out_features, action_dim)
+#             if init_final is not None:
+#                 nn.init.uniform_(self.std_layer.weight, -init_final, init_final)
+#                 nn.init.uniform_(self.std_layer.bias, -init_final, init_final)
+#             else:
+#                 orthogonal_init()(self.std_layer.weight)
 
-    def forward(
-        self,
-        observations: torch.Tensor,
-        observation_features: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # We detach the encoder if it is shared to avoid backprop through it
-        # This is important to avoid the encoder to be updated through the policy
-        obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+#     def forward(
+#         self,
+#         observations: torch.Tensor,
+#         observation_features: torch.Tensor | None = None,
+#     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+#         # We detach the encoder if it is shared to avoid backprop through it
+#         # This is important to avoid the encoder to be updated through the policy
+#         obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
 
-        # Get network outputs
-        outputs = self.network(obs_enc)
-        means = self.mean_layer(outputs)
+#         # Get network outputs
+#         outputs = self.network(obs_enc)
+#         means = self.mean_layer(outputs)
 
-        # Compute standard deviations
-        if self.fixed_std is None:
-            log_std = self.std_layer(outputs)
-            std = torch.exp(log_std)  # Match JAX "exp"
-            std = torch.clamp(std, self.std_min, self.std_max)  # Match JAX default clip
-        else:
-            std = self.fixed_std.expand_as(means)
+#         # Compute standard deviations
+#         if self.fixed_std is None:
+#             log_std = self.std_layer(outputs)
+#             std = torch.exp(log_std)  # Match JAX "exp"
+#             std = torch.clamp(std, self.std_min, self.std_max)  # Match JAX default clip
+#         else:
+#             std = self.fixed_std.expand_as(means)
 
-        # Build transformed distribution
-        dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
+#         # Build transformed distribution
+#         dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
 
-        # Sample actions (reparameterized)
-        actions = dist.rsample()
+#         # Sample actions (reparameterized)
+#         actions = dist.rsample()
 
-        # Compute log_probs
-        log_probs = dist.log_prob(actions)
+#         # Compute log_probs
+#         log_probs = dist.log_prob(actions)
 
-        return actions, log_probs, means
+#         return actions, log_probs, means
 
-    def get_features(self, observations: torch.Tensor) -> torch.Tensor:
-        """Get encoded features from observations"""
-        device = get_device_from_parameters(self)
-        observations = observations.to(device)
-        if self.encoder is not None:
-            with torch.inference_mode():
-                return self.encoder(observations)
-        return observations
-
+#     def get_features(self, observations: torch.Tensor) -> torch.Tensor:
+#         """Get encoded features from observations"""
+#         device = get_device_from_parameters(self)
+#         observations = observations.to(device)
+#         if self.encoder is not None:
+#             with torch.inference_mode():
+#                 return self.encoder(observations)
+#         return observations
 
 class ActorVectorFieldPolicy(nn.Module):
     """

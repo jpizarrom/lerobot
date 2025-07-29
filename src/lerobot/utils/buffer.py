@@ -236,10 +236,12 @@ class ReplayBuffer:
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(self, batch_size: int) -> BatchTransition:
+    def sample(self, batch_size: int, n_steps: int | None = None) -> BatchTransition:
         """Sample a random batch of transitions and collate them into batched tensors."""
         if not self.initialized:
             raise RuntimeError("Cannot sample from an empty buffer. Add transitions first.")
+    
+        assert n_steps is not None or n_steps > 0, "n_steps must be specified and greater than 0."
 
         batch_size = min(batch_size, self.size)
         high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
@@ -248,7 +250,7 @@ class ReplayBuffer:
         idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
 
         # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
-        self.n_steps = 10
+        self.n_steps = n_steps
         self.gamma = 0.99
 
         last_valid_index = self.position - 1
@@ -404,6 +406,7 @@ class ReplayBuffer:
         batch_size: int,
         async_prefetch: bool = True,
         queue_size: int = 2,
+        n_steps: int | None = None,
     ):
         """
         Creates an infinite iterator that yields batches of transitions.
@@ -420,15 +423,15 @@ class ReplayBuffer:
         while True:  # Create an infinite loop
             if async_prefetch:
                 # Get the standard iterator
-                iterator = self._get_async_iterator(queue_size=queue_size, batch_size=batch_size)
+                iterator = self._get_async_iterator(queue_size=queue_size, batch_size=batch_size, n_steps=n_steps)
             else:
-                iterator = self._get_naive_iterator(batch_size=batch_size, queue_size=queue_size)
+                iterator = self._get_naive_iterator(batch_size=batch_size, queue_size=queue_size, n_steps=n_steps)
 
             # Yield all items from the iterator
             with suppress(StopIteration):
                 yield from iterator
 
-    def _get_async_iterator(self, batch_size: int, queue_size: int = 2):
+    def _get_async_iterator(self, batch_size: int, queue_size: int = 2, n_steps: int | None = None):
         """
         Create an iterator that continuously yields prefetched batches in a
         background thread. The design is intentionally simple and avoids busy
@@ -452,7 +455,7 @@ class ReplayBuffer:
             """Continuously put sampled batches into the queue until shutdown."""
             while not shutdown_event.is_set():
                 try:
-                    batch = self.sample(batch_size)
+                    batch = self.sample(batch_size, n_steps=n_steps)
                     # The timeout ensures the thread unblocks if the queue is full
                     # and the shutdown event gets set meanwhile.
                     data_queue.put(batch, block=True, timeout=0.5)
@@ -482,7 +485,7 @@ class ReplayBuffer:
             # Give the producer thread a bit of time to finish.
             producer_thread.join(timeout=1.0)
 
-    def _get_naive_iterator(self, batch_size: int, queue_size: int = 2):
+    def _get_naive_iterator(self, batch_size: int, queue_size: int = 2, n_steps: int | None = None):
         """
         Creates a simple non-threaded iterator that yields batches.
 
@@ -499,7 +502,7 @@ class ReplayBuffer:
 
         def enqueue(n):
             for _ in range(n):
-                data = self.sample(batch_size)
+                data = self.sample(batch_size, n_steps=n_steps)
                 queue.append(data)
 
         enqueue(queue_size)

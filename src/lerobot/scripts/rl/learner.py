@@ -394,12 +394,12 @@ def add_actor_information_and_train(
 
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
+                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2, n_steps=cfg.policy.chunk_size
             )
 
         if offline_replay_buffer is not None and offline_iterator is None:
             offline_iterator = offline_replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
+                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2, n_steps=cfg.policy.chunk_size
             )
 
         time_for_one_optimization_step = time.time()
@@ -911,8 +911,8 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_bc_flow.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
-            # if not any(n.startswith(p) for p in params_to_skip)
+            # if not policy.config.shared_encoder or not n.startswith("encoder")
+            if not any(n.startswith(p) for p in params_to_skip)
         ],
         lr=cfg.policy.actor_lr,
     )
@@ -920,8 +920,8 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_onestep_flow.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
-            # if not any(n.startswith(p) for p in params_to_skip)
+            # if not policy.config.shared_encoder or not n.startswith("encoder")
+            if not any(n.startswith(p) for p in params_to_skip)
         ],
         lr=cfg.policy.actor_lr,
     )
