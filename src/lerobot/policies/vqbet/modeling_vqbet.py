@@ -18,7 +18,7 @@
 
 import warnings
 from collections import deque
-from typing import Callable, List
+from collections.abc import Callable
 
 import einops
 import numpy as np
@@ -124,14 +124,14 @@ class VQBeTPolicy(PreTrainedPolicy):
             ACTION: deque(maxlen=self.config.action_chunk_size),
         }
 
-    @torch.no_grad
+    @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
         actions = self.vqbet(batch, rollout=True)[:, : self.config.action_chunk_size]
         actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
 
-    @torch.no_grad
+    @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations.
 
@@ -139,11 +139,14 @@ class VQBeTPolicy(PreTrainedPolicy):
         environment. It works by managing the actions in a queue and only calling `select_actions` when the
         queue is empty.
         """
-
+        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
+        if ACTION in batch:
+            batch.pop(ACTION)
         batch = self.normalize_inputs(batch)
         batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+        # NOTE: It's important that this happens after stacking the images into a single key.
         batch["observation.images"] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        # Note: It's important that this happens after stacking the images into a single key.
+
         self._queues = populate_queues(self._queues, batch)
 
         if not self.vqbet.action_head.vqvae_model.discretized.item():
@@ -901,7 +904,7 @@ class MLP(torch.nn.Sequential):
     def __init__(
         self,
         in_channels: int,
-        hidden_channels: List[int],
+        hidden_channels: list[int],
     ):
         layers = []
         in_dim = in_channels
