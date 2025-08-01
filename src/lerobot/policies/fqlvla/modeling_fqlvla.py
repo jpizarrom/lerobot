@@ -17,8 +17,9 @@
 
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict
-from typing import Callable, Literal
+from typing import Literal
 
 import einops
 import numpy as np
@@ -27,33 +28,26 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 from torch.distributions import (
+    Categorical,
     MultivariateNormal,
     TanhTransform,
     Transform,
     TransformedDistribution,
-    Categorical,
 )
-
 from transformers import (
-    AutoConfig,
     AutoModel,
     AutoModelForImageTextToText,
-    AutoProcessor,
     SmolVLMForConditionalGeneration,
 )
 
-from lerobot.policies.normalize import NormalizeBuffer
-from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.policies.fqlvla.configuration_fqlvla import FQLVLAConfig, is_image_feature
-from lerobot.policies.utils import get_device_from_parameters
-
-from lerobot.configs.types import FeatureType
-from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks
-from lerobot.policies.smolvla.modeling_smolvla import pad_vector
+from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+from lerobot.policies.fqlvla.configuration_fqlvla import FQLVLAConfig, is_image_feature
+from lerobot.policies.normalize import NormalizeBuffer, UnnormalizeBuffer
+from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, make_att_2d_masks
+from lerobot.policies.utils import get_device_from_parameters
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
 
@@ -121,7 +115,7 @@ class FQLVLAPolicy(
     #     if self.shared_encoder and self.actor_bc_flow.encoder.has_images:
     #         # Cache and normalize image features
     #         observations_features = self.actor_bc_flow.encoder.get_cached_image_features(batch, normalize=True)
-        
+
     #     actions = noises
     #     flow_steps = self.config.flow_steps
     #     dt = 1.0 / flow_steps
@@ -164,7 +158,7 @@ class FQLVLAPolicy(
 
         # actions = self.actor_onestep_flow.encoder.vla.select_action_onestep(batch_with_task)
         # actions = torch.clamp(actions, -1.0, 1.0)
-        
+
         # # _, _, actions = self.actor_onestep_flow(batch_with_task, observations_features)
         # # # Unpad actions
         # # original_action_dim = self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]
@@ -177,33 +171,35 @@ class FQLVLAPolicy(
         observations_features = None
         if self.shared_encoder and self.actor_onestep_flow.encoder.has_images:
             # Cache and normalize image features
-            observations_features = self.actor_onestep_flow.encoder.get_cached_image_features(batch, normalize=True)
+            observations_features = self.actor_onestep_flow.encoder.get_cached_image_features(
+                batch, normalize=True
+            )
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
         # querying the policy.
         if len(self._action_queue) == 0:
-
             # batch_shape = list(observations[list(observations.keys())[0]].shape[:-1])
-            batch_shape = batch['observation.state'].shape[0]
-            action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
-            device = batch['observation.state'].device
+            batch_shape = batch["observation.state"].shape[0]
+            action_dim = self.actor_onestep_flow.action_dim  # self.config['action_dim']
+            device = batch["observation.state"].device
 
             noises = torch.randn(batch_shape, action_dim, device=device)
 
             actions, _, _ = self.actor_onestep_flow(batch, observations_features, noises)
 
             actions = actions.reshape(batch_shape, -1, 4)
-            actions = self.actor_bc_flow.encoder.vla.unnormalize_outputs({"action":actions})["action"]
-            continuous_actions = actions[:, :, :3]
-            discrete_actions = actions[:, :, 3:]
-            continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
-            discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
-            actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
+            actions = torch.clamp(actions, -1.0, 1.0)
+            # actions = self.actor_bc_flow.encoder.vla.unnormalize_outputs({"action":actions})["action"]
+            actions = self.unnormalize_targets({"action": actions})["action"]
+            # continuous_actions = actions[:, :, :3]
+            # discrete_actions = actions[:, :, 3:]
+            # continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
+            # discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
+            # actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
             # actions = actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
 
             self._action_queue.extend(actions.transpose(0, 1))
 
-        
         actions = self._action_queue.popleft()
 
         # if self.config.num_discrete_actions is not None:
@@ -237,25 +233,25 @@ class FQLVLAPolicy(
         q_values = critics(observations, actions, observation_features, do_output_normalization)
         return q_values
 
-    def discrete_critic_forward(
-        self,
-        observations,
-        use_target=False,
-        observation_features=None
-    ) -> torch.Tensor:
-        """Forward pass through a discrete critic network
+    # def discrete_critic_forward(
+    #     self,
+    #     observations,
+    #     use_target=False,
+    #     observation_features=None
+    # ) -> torch.Tensor:
+    #     """Forward pass through a discrete critic network
 
-        Args:
-            observations: Dictionary of observations
-            use_target: If True, use target critics, otherwise use ensemble critics
-            observation_features: Optional pre-computed observation features to avoid recomputing encoder output
+    #     Args:
+    #         observations: Dictionary of observations
+    #         use_target: If True, use target critics, otherwise use ensemble critics
+    #         observation_features: Optional pre-computed observation features to avoid recomputing encoder output
 
-        Returns:
-            Tensor of Q-values from the discrete critic network
-        """
-        discrete_critic = self.discrete_critic_target if use_target else self.discrete_critic
-        q_values = discrete_critic(observations, observation_features)
-        return q_values
+    #     Returns:
+    #         Tensor of Q-values from the discrete critic network
+    #     """
+    #     discrete_critic = self.discrete_critic_target if use_target else self.discrete_critic
+    #     q_values = discrete_critic(observations, observation_features)
+    #     return q_values
 
     def forward(
         self,
@@ -337,27 +333,27 @@ class FQLVLAPolicy(
         #     }
         if model == "actor_bc_flow":
             loss_actor_bc_flow, info = self.compute_loss_actor_bc_flow(
-                    observations=observations,
-                    observation_features=observation_features,
-                    actions=actions,
-                    actions_is_pad=actions_is_pad,
-                )
+                observations=observations,
+                observation_features=observation_features,
+                actions=actions,
+                actions_is_pad=actions_is_pad,
+            )
             return {
                 "loss_actor_bc_flow": loss_actor_bc_flow,
                 "info": info,
             }
         if model == "actor_onestep_flow":
             actor_onestep_flow_loss, info = self.compute_loss_actor_onestep_flow(
-                    observations=observations,
-                    observation_features=observation_features,
-                    actions=actions,
-                    actions_is_pad=actions_is_pad,
-                )
+                observations=observations,
+                observation_features=observation_features,
+                actions=actions,
+                actions_is_pad=actions_is_pad,
+            )
             return {
                 "loss_actor_onestep_flow": actor_onestep_flow_loss,
                 "info": info,
             }
-        
+
         # if model == "discrete_actor":
         #     if self.config.num_discrete_actions is None:
         #         raise ValueError("Discrete actor is not configured for this policy.")
@@ -418,17 +414,21 @@ class FQLVLAPolicy(
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
     ) -> Tensor:
-        with torch.no_grad():
-            batch_shape = next_observations['observation.state'].shape[0]
-            action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
+        actions = self.normalize_targets({"action": actions})["action"]
 
-            noises = torch.randn(batch_shape, action_dim, device=next_observations['observation.state'].device)
+        with torch.no_grad():
+            batch_shape = next_observations["observation.state"].shape[0]
+            action_dim = self.actor_onestep_flow.action_dim  # self.config['action_dim']
+
+            noises = torch.randn(
+                batch_shape, action_dim, device=next_observations["observation.state"].device
+            )
             next_actions, _, _ = self.actor_onestep_flow(next_observations, next_observation_features, noises)
 
             # next_actions = next_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
             # next_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": next_actions})["action"]
             # next_actions = self.select_action(next_observations)
-            
+            next_actions = torch.clamp(next_actions, -1.0, 1.0)
             # next_actions = next_actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
             # continuous_actions = next_actions[:, :, :DISCRETE_DIMENSION_INDEX]
             # discrete_actions = next_actions[:, :, DISCRETE_DIMENSION_INDEX:]
@@ -444,21 +444,25 @@ class FQLVLAPolicy(
                 use_target=True,
                 observation_features=next_observation_features,
                 do_output_normalization=False,
-            ) # (critic_ensemble_size, batch_size)
+            )  # (critic_ensemble_size, batch_size)
 
             # subsample critics to prevent overfitting if use high UTD (update to date)
             # TODO: Get indices before forward pass to avoid unnecessary computation
             if self.config.num_subsample_critics is not None:
-                indices = torch.randperm(self.config.num_critics)
-                indices = indices[: self.config.num_subsample_critics]
-                next_qs = next_qs[indices]
+                raise NotImplementedError(
+                    "Subsampling critics is not implemented yet. "
+                    "Please set num_subsample_critics to None or implement the subsampling logic."
+                )
+                # indices = torch.randperm(self.config.num_critics)
+                # indices = indices[: self.config.num_subsample_critics]
+                # next_qs = next_qs[indices]
 
             # critics subsample size
-            if self.config.q_agg == 'min':
+            if self.config.q_agg == "min":
                 next_q, _ = next_qs.min(dim=0)  # Get values from min operation
             else:
                 next_q = next_qs.mean(dim=0)
-            
+
             # if self.config.use_backup_entropy:
             #     min_q = min_q - (self.temperature * next_log_probs)
 
@@ -466,7 +470,7 @@ class FQLVLAPolicy(
             td_target = rewards.squeeze(-1) + (1 - done) * discounts.squeeze(-1) * next_q
             # td_target = rewards.squeeze(-1) + (1 - done) * self.config.discount * next_q
 
-        # # 3- compute predicted qs
+        # 3- compute predicted qs
         # if self.config.num_discrete_actions is not None:
         #     # NOTE: We only want to keep the continuous action part
         #     # In the buffer we have the full action space (continuous + discrete)
@@ -476,16 +480,14 @@ class FQLVLAPolicy(
         # actions = pad_vector(actions, 32)
         # actions = actions[:, 0, :3] # TODO: use all chunks
         # actions = actions * (~actions_is_pad).unsqueeze(-1)
-        actions = actions[:, :, :].reshape(
-            actions.shape[0], -1
-        ) # [32, 150]
-        
+        actions = actions[:, :, :].reshape(actions.shape[0], -1)  # [32, 150]
+
         q_preds = self.critic_forward(
             observations=observations,
             actions=actions,
             use_target=False,
             observation_features=observation_features,
-            do_output_normalization=True,
+            do_output_normalization=False,
         )
 
         # 4- Calculate loss
@@ -506,7 +508,7 @@ class FQLVLAPolicy(
             "target_qs": torch.mean(td_target_duplicate),
             "rewards": rewards.mean(),
         }
-        
+
         return critics_loss, info
 
     # def compute_loss_discrete_critic(
@@ -629,6 +631,7 @@ class FQLVLAPolicy(
         actions: Tensor | None,
         actions_is_pad: Tensor | None,
     ) -> Tensor:
+        actions = self.normalize_targets({"action": actions})["action"]
 
         bc_flow_loss, _, _ = self.actor_bc_flow(observations, observation_features, actions, actions_is_pad)
 
@@ -665,36 +668,45 @@ class FQLVLAPolicy(
     ) -> Tensor:
         batch_size = actions.shape[0]
         # action_dim = self.actor_onestep_flow.action_dim # self.config['action_dim']
-        action_dim = self.actor_bc_flow.action_dim
+        # action_dim = self.actor_bc_flow.action_dim
 
-
-        # Distillation loss.        
+        # Distillation loss.
         # noises = torch.randn(batch_size, action_dim, device=observations['observation.state'].device)
         with torch.no_grad():
-            noises = self.actor_bc_flow.encoder.vla.model.sample_noise((batch_size, self.actor_bc_flow.encoder.vla.model.config.chunk_size, self.actor_bc_flow.encoder.vla.model.config.max_action_dim), device=observations['observation.state'].device)
+            noises = self.actor_bc_flow.encoder.vla.model.sample_noise(
+                (
+                    batch_size,
+                    self.actor_bc_flow.encoder.vla.model.config.chunk_size,
+                    self.actor_bc_flow.encoder.vla.model.config.max_action_dim,
+                ),
+                device=observations["observation.state"].device,
+            )
 
-        target_flow_actions, _, _ = self.actor_bc_flow.sample_actions(observations, observation_features, noises=noises)
+        target_flow_actions, _, _ = self.actor_bc_flow.sample_actions(
+            observations, observation_features, noises=noises
+        )
 
         target_flow_actions = target_flow_actions[:, :, :4]
         # target_flow_actions = self.actor_bc_flow.encoder.vla.unnormalize_outputs({"action": target_flow_actions})["action"]
 
         # target_flow_actions = torch.clamp(target_flow_actions, -1.0, 1.0)
-        target_flow_actions = target_flow_actions.reshape( target_flow_actions.shape[0], -1 )
+        target_flow_actions = target_flow_actions.reshape(target_flow_actions.shape[0], -1)
         # _, _, actor_actions  = self.actor_onestep_flow(observations, observation_features, noises)
-        actor_actions, _, _  = self.actor_onestep_flow(observations, observation_features, noises[:,:,:4].reshape(batch_size, -1))
+        actor_actions, _, _ = self.actor_onestep_flow(
+            observations, observation_features, noises[:, :, :4].reshape(batch_size, -1)
+        )
 
         distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
 
         # Q loss.
         # actor_actions = actor_actions.reshape(batch_size, -1, 4)  # Reshape to match action dimensions
-
         # actor_continuous_actions = actor_actions[:, :, :DISCRETE_DIMENSION_INDEX]
         # actor_discrete_actions = actor_actions[:, :, DISCRETE_DIMENSION_INDEX:]
         # actor_continuous_actions = torch.clamp(actor_continuous_actions, -1.0, 1.0)
         # actor_discrete_actions = torch.clamp(actor_discrete_actions, 0.0, 2.0)
         # actor_actions = torch.cat([actor_continuous_actions, actor_discrete_actions], dim=-1)
         # actor_actions = actor_actions.reshape(batch_size, -1)  # Flatten the action dimension
-        # actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+        actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
 
         q_preds = self.critic_forward(
             observations=observations,
@@ -736,6 +748,9 @@ class FQLVLAPolicy(
             self.normalize_targets = NormalizeBuffer(
                 self.config.output_features, self.config.normalization_mapping, stats
             )
+            self.unnormalize_targets = UnnormalizeBuffer(
+                self.config.output_features, self.config.normalization_mapping, stats
+            )
 
     def _init_encoders(self):
         """Initialize shared or separate encoders for actor and critic."""
@@ -749,52 +764,57 @@ class FQLVLAPolicy(
 
         cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
         # cfg_policy.n_obs_steps: int = 1
-        cfg_policy.chunk_size: int = self.config.chunk_size
-        cfg_policy.n_action_steps: int = self.config.chunk_size
-        # cfg_policy.train_state_proj: bool = False
+        cfg_policy.chunk_size = self.config.chunk_size
+        cfg_policy.n_action_steps = self.config.chunk_size
+        # cfg_policy.train_state_proj = False
 
         cfg_policy.normalization_mapping = {
             "VISUAL": NormalizationMode.IDENTITY,
             "STATE": NormalizationMode.MIN_MAX,
             # "ENV": NormalizationMode.MIN_MAX,
             # "ACTION": NormalizationMode.MIN_MAX,
-            "ACTION": NormalizationMode.MEAN_STD,
+            "ACTION": NormalizationMode.IDENTITY,
         }
         kwargs = {}
         # kwargs["pretrained_name_or_path"] = "lerobot/smolvla_base"
 
-        from lerobot.configs.train import TrainRLServerPipelineConfig
-        from lerobot.datasets.factory import make_dataset
+        # from lerobot.configs.train import TrainRLServerPipelineConfig
+        # from lerobot.datasets.factory import make_dataset
 
-        cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
-        cfg.policy.chunk_size = self.config.chunk_size
-        offline_dataset = make_dataset(cfg)
+        # cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
+        # cfg.policy.chunk_size = self.config.chunk_size
+        # offline_dataset = make_dataset(cfg)
         # for k in ["min", "max", "mean", "std"]:
         #     offline_dataset.meta.stats["action"][k] = offline_dataset.meta.stats["action"][k][:-1]
         # kwargs["dataset_stats"] = offline_dataset.meta.stats
         kwargs["dataset_stats"] = _convert_normalization_params_to_tensor(self.config.dataset_stats)
         # features = env_to_policy_features(cfg.env)
-        cfg_policy.output_features = {'action': PolicyFeature(type=FeatureType.ACTION, shape=(4,))}
+        cfg_policy.output_features = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))}
         cfg_policy.input_features = {
-            'observation.images.front': PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
-            'observation.images.wrist': PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
-            'observation.state': PolicyFeature(type=FeatureType.STATE, shape=(18,))
+            "observation.images.front": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+            "observation.images.wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(18,)),
         }
         # cfg_policy.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
         # cfg_policy.input_features = {key: ft for key, ft in features.items() if key not in cfg_policy.output_features}
         kwargs["config"] = cfg_policy
 
         self.vlm: SmolVLMForConditionalGeneration = AutoModelForImageTextToText.from_pretrained(
-                pretrained_model_name_or_path="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
-                device_map="auto",
-                torch_dtype="bfloat16",
-                low_cpu_mem_usage=True,
-            )
+            pretrained_model_name_or_path="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+            device_map="auto",
+            torch_dtype="bfloat16",
+            low_cpu_mem_usage=True,
+        )
         # self.vlm.model.text_model.layers = self.vlm.model.text_model.layers[:cfg_policy.num_vlm_layers]
 
         # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy(vlm=self.vlm, **kwargs))
         # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
-        self.encoder_actor_bc_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
+        self.encoder_actor_bc_flow = SACObservationEncoderVLA(
+            self.config,
+            SmolVLAPolicy.from_pretrained(
+                pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs
+            ),
+        )
 
         # self.encoder_actor_bc_flow = (
         #     self.encoder_critic
@@ -829,7 +849,8 @@ class FQLVLAPolicy(
         """Build critic ensemble, targets, and optional discrete critic."""
         heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim + (continuous_action_dim + 1) * self.config.chunk_size,
+                input_dim=self.encoder_critic.output_dim
+                + (continuous_action_dim + 1) * self.config.chunk_size,
                 **asdict(self.config.critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -839,7 +860,8 @@ class FQLVLAPolicy(
         )
         target_heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim + (continuous_action_dim + 1) * self.config.chunk_size,
+                input_dim=self.encoder_critic.output_dim
+                + (continuous_action_dim + 1) * self.config.chunk_size,
                 **asdict(self.config.critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -883,7 +905,7 @@ class FQLVLAPolicy(
 
         self.target_entropy = self.config.target_entropy
         if self.target_entropy is None:
-            dim = (self.config.num_discrete_actions if self.config.num_discrete_actions is not None else 0)
+            dim = self.config.num_discrete_actions if self.config.num_discrete_actions is not None else 0
             self.target_entropy = -np.prod(dim) / 2
 
         # if self.config.num_discrete_actions is not None:
@@ -895,7 +917,11 @@ class FQLVLAPolicy(
         params = asdict(self.config.actor_network_kwargs)
         self.actor_onestep_flow = ActorVectorFieldPolicy(
             encoder=self.encoder_actor_onestep_flow,
-            network=MLP(input_dim=self.encoder_actor_onestep_flow.output_dim + (continuous_action_dim + 1) *self.config.chunk_size, **params),
+            network=MLP(
+                input_dim=self.encoder_actor_onestep_flow.output_dim
+                + (continuous_action_dim + 1) * self.config.chunk_size,
+                **params,
+            ),
             action_dim=(continuous_action_dim + 1) * self.config.chunk_size,
             # num_discrete_actions=self.config.num_discrete_actions* self.config.chunk_size,
             encoder_is_shared=self.shared_encoder,
@@ -930,6 +956,7 @@ class FQLVLAPolicy(
         self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)]))
         self.temperature = self.log_alpha.exp().item()
 
+
 class SACObservationEncoderVLA(nn.Module):
     """Encode image and/or state vector observations."""
 
@@ -946,7 +973,9 @@ class SACObservationEncoderVLA(nn.Module):
         state = self.vla.prepare_state(batch)
         batch["task"] = "pick up the pink cube"
         lang_tokens, lang_masks = self.vla.prepare_language(batch)
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.vla.model.embed_prefix(images, img_masks, lang_tokens, lang_masks, state=state)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.vla.model.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
 
         return prefix_embs, prefix_pad_masks, prefix_att_masks, state
 
@@ -1041,11 +1070,12 @@ class SACObservationEncoder(nn.Module):
         if self.has_env:
             parts.append(self.env_encoder(obs["observation.environment_state"]))
         if self.has_state:
-            if obs["observation.state"].ndim == 3:
-                # TODO: remove this when we have a proper dimension
-                parts.append(self.state_encoder(obs["observation.state"].squeeze(1)))
-            else:
-                parts.append(self.state_encoder(obs["observation.state"]))
+            # if obs["observation.state"].ndim == 3:
+            #     # TODO: remove this when we have a proper dimension
+            #     parts.append(self.state_encoder(obs["observation.state"].squeeze(1)))
+            # else:
+            #     parts.append(self.state_encoder(obs["observation.state"]))
+            parts.append(self.state_encoder(obs["observation.state"]))
         if parts:
             return torch.cat(parts, dim=-1)
 
@@ -1283,103 +1313,103 @@ class CriticEnsemble(nn.Module):
         return q_values
 
 
-class DiscreteCriticHead(nn.Module):
-    def __init__(
-        self,
-        # encoder: nn.Module,
-        input_dim: int,
-        hidden_dims: list[int],
-        output_dim: int = 3,
-        activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.GELU(),
-        activate_final: bool = False,
-        # dropout_rate: float | None = None,
-        default_init: float | None = None,
-        init_final: float | None = None,
-        final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
-        layer_norm: bool = False,
-    ):
-        super().__init__()
-        # self.encoder = encoder
-        self.output_dim = output_dim
+# class DiscreteCriticHead(nn.Module):
+#     def __init__(
+#         self,
+#         # encoder: nn.Module,
+#         input_dim: int,
+#         hidden_dims: list[int],
+#         output_dim: int = 3,
+#         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.GELU(),
+#         activate_final: bool = False,
+#         # dropout_rate: float | None = None,
+#         default_init: float | None = None,
+#         init_final: float | None = None,
+#         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
+#         layer_norm: bool = False,
+#     ):
+#         super().__init__()
+#         # self.encoder = encoder
+#         self.output_dim = output_dim
 
-        self.net = MLP(
-            input_dim=input_dim,
-            hidden_dims=hidden_dims,
-            activations=activations,
-            activate_final=activate_final,
-            # dropout_rate=dropout_rate,
-            final_activation=final_activation,
-            layer_norm=layer_norm,
-            default_init=default_init,
-        )
+#         self.net = MLP(
+#             input_dim=input_dim,
+#             hidden_dims=hidden_dims,
+#             activations=activations,
+#             activate_final=activate_final,
+#             # dropout_rate=dropout_rate,
+#             final_activation=final_activation,
+#             layer_norm=layer_norm,
+#             default_init=default_init,
+#         )
 
-        self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=self.output_dim)
-        if init_final is not None:
-            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
-            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
-        else:
-            orthogonal_init()(self.output_layer.weight)
-            # nn.init.zeros_(self.output_layer.bias)
+#         self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=self.output_dim)
+#         if init_final is not None:
+#             nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+#             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+#         else:
+#             orthogonal_init()(self.output_layer.weight)
+#             # nn.init.zeros_(self.output_layer.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # device = get_device_from_parameters(self)
-        # observations = {k: v.to(device) for k, v in observations.items()}
-        # obs_enc = self.encoder(observations, cache=observation_features)
-        return self.output_layer(self.net(x))
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         # device = get_device_from_parameters(self)
+#         # observations = {k: v.to(device) for k, v in observations.items()}
+#         # obs_enc = self.encoder(observations, cache=observation_features)
+#         return self.output_layer(self.net(x))
 
 
-class DiscreteCriticEnsemble(nn.Module):
-    """
-    CriticEnsemble wraps multiple CriticHead modules into an ensemble.
+# class DiscreteCriticEnsemble(nn.Module):
+#     """
+#     CriticEnsemble wraps multiple CriticHead modules into an ensemble.
 
-    Args:
-        encoder (SACObservationEncoder): encoder for observations.
-        ensemble (List[CriticHead]): list of critic heads.
-        output_normalization (nn.Module): normalization layer for actions.
-        init_final (float | None): optional initializer scale for final layers.
+#     Args:
+#         encoder (SACObservationEncoder): encoder for observations.
+#         ensemble (List[CriticHead]): list of critic heads.
+#         output_normalization (nn.Module): normalization layer for actions.
+#         init_final (float | None): optional initializer scale for final layers.
 
-    Forward returns a tensor of shape (num_critics, batch_size) containing Q-values.
-    """
+#     Forward returns a tensor of shape (num_critics, batch_size) containing Q-values.
+#     """
 
-    def __init__(
-        self,
-        encoder: SACObservationEncoder,
-        ensemble: list[CriticHead],
-        # output_normalization: nn.Module,
-        init_final: float | None = None,
-    ):
-        super().__init__()
-        self.encoder = encoder
-        self.init_final = init_final
-        # self.output_normalization = output_normalization
-        self.critics = nn.ModuleList(ensemble)
+#     def __init__(
+#         self,
+#         encoder: SACObservationEncoder,
+#         ensemble: list[CriticHead],
+#         # output_normalization: nn.Module,
+#         init_final: float | None = None,
+#     ):
+#         super().__init__()
+#         self.encoder = encoder
+#         self.init_final = init_final
+#         # self.output_normalization = output_normalization
+#         self.critics = nn.ModuleList(ensemble)
 
-    def forward(
-        self,
-        observations: dict[str, torch.Tensor],
-        observation_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        device = get_device_from_parameters(self)
-        # Move each tensor in observations to device
-        observations = {k: v.to(device) for k, v in observations.items()}
-        # NOTE: We normalize actions it helps for sample efficiency
-        # actions: dict[str, torch.tensor] = {"action": actions}
-        # NOTE: Normalization layer took dict in input and outputs a dict that why
-        # actions = self.output_normalization(actions)["action"]
-        # actions = actions.to(device)
+#     def forward(
+#         self,
+#         observations: dict[str, torch.Tensor],
+#         observation_features: torch.Tensor | None = None,
+#     ) -> torch.Tensor:
+#         device = get_device_from_parameters(self)
+#         # Move each tensor in observations to device
+#         observations = {k: v.to(device) for k, v in observations.items()}
+#         # NOTE: We normalize actions it helps for sample efficiency
+#         # actions: dict[str, torch.tensor] = {"action": actions}
+#         # NOTE: Normalization layer took dict in input and outputs a dict that why
+#         # actions = self.output_normalization(actions)["action"]
+#         # actions = actions.to(device)
 
-        obs_enc = self.encoder(observations, cache=observation_features)
+#         obs_enc = self.encoder(observations, cache=observation_features)
 
-        # inputs = torch.cat([obs_enc, actions], dim=-1)
+#         # inputs = torch.cat([obs_enc, actions], dim=-1)
 
-        # Loop through critics and collect outputs
-        q_values = []
-        for critic in self.critics:
-            q_values.append(critic(obs_enc))
+#         # Loop through critics and collect outputs
+#         q_values = []
+#         for critic in self.critics:
+#             q_values.append(critic(obs_enc))
 
-        # Stack outputs to match expected shape [num_critics, batch_size]
-        q_values = torch.stack([q.squeeze(-1) for q in q_values], dim=0)
-        return q_values
+#         # Stack outputs to match expected shape [num_critics, batch_size]
+#         q_values = torch.stack([q.squeeze(-1) for q in q_values], dim=0)
+#         return q_values
 
 
 # class Policy(nn.Module):
@@ -1468,6 +1498,7 @@ class DiscreteCriticEnsemble(nn.Module):
 #                 return self.encoder(observations)
 #         return observations
 
+
 class ActorVectorFieldPolicy(nn.Module):
     """
     Actor vector field network for flow matching.
@@ -1535,6 +1566,7 @@ class ActorVectorFieldPolicy(nn.Module):
         # Get network outputs
         outputs = self.output_layer(self.network(x))
         return outputs, None, None  # Return None for log_probs and means as they are not used in this context
+
 
 class ActorVectorFieldPolicyVLA(nn.Module):
     """
@@ -1608,8 +1640,12 @@ class ActorVectorFieldPolicyVLA(nn.Module):
             **observations,
         }
         loss, loss_dict, v_t = self.encoder.vla.forward(observations_with_task, noise=None)
-  
-        return loss, loss_dict, v_t  # Return None for log_probs and means as they are not used in this context
+
+        return (
+            loss,
+            loss_dict,
+            v_t,
+        )  # Return None for log_probs and means as they are not used in this context
 
     @torch.no_grad()
     def sample_actions(
@@ -1647,7 +1683,9 @@ class ActorVectorFieldPolicyVLA(nn.Module):
         state = self.encoder.vla.prepare_state(batch)
         lang_tokens, lang_masks = self.encoder.vla.prepare_language(batch)
 
-        actions = self.encoder.vla.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state, noise=noises)
+        actions = self.encoder.vla.model.sample_actions(
+            images, img_masks, lang_tokens, lang_masks, state, noise=noises
+        )
 
         # Unpad actions
         # original_action_dim = self.encoder.vla.config.action_feature.shape[0]
@@ -1655,9 +1693,10 @@ class ActorVectorFieldPolicyVLA(nn.Module):
 
         # actions = self.encoder.vla.unnormalize_outputs({"action": actions})["action"]
 
-        # actions = torch.clamp(actions, -1.0, 1.0)
-  
+        actions = torch.clamp(actions, -1.0, 1.0)
+
         return actions, None, None  # Return None for log_probs and means as they are not used in this context
+
 
 class ActorVectorFieldPolicyVLAOneStep(nn.Module):
     """
@@ -1737,9 +1776,13 @@ class ActorVectorFieldPolicyVLAOneStep(nn.Module):
         # actions = self.encoder.vla.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state, noise=noises)
         bsize = state.shape[0]
         device = state.device
-        
+
         if noises is None:
-            actions_shape = (bsize, self.encoder.vla.model.config.chunk_size, self.encoder.vla.model.config.max_action_dim)
+            actions_shape = (
+                bsize,
+                self.encoder.vla.model.config.chunk_size,
+                self.encoder.vla.model.config.max_action_dim,
+            )
             noise = self.encoder.vla.model.sample_noise(actions_shape, device)
         else:
             noise = noises
@@ -1768,7 +1811,7 @@ class ActorVectorFieldPolicyVLAOneStep(nn.Module):
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.encoder.vla.model.action_out_proj(suffix_out)
-  
+
         return None, None, v_t  # Return None for log_probs and means as they are not used in this context
 
 
@@ -1810,6 +1853,7 @@ class DefaultImageEncoder(nn.Module):
     def forward(self, x):
         x = self.image_enc_layers(x)
         return x
+
 
 class DiscretePolicy(nn.Module):
     def __init__(
@@ -1854,9 +1898,7 @@ class DiscretePolicy(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # We detach the encoder if it is shared to avoid backprop through it
         # This is important to avoid the encoder to be updated through the policy
-        obs_enc = self.encoder(
-            observations, cache=observation_features, detach=self.encoder_is_shared
-        )
+        obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
 
         # Get network outputs
         outputs = self.network(obs_enc)
@@ -1879,6 +1921,7 @@ class DiscretePolicy(nn.Module):
                 return self.encoder(observations)
         return observations
 
+
 def freeze_image_encoder(image_encoder: nn.Module):
     """Freeze all parameters in the encoder"""
     for param in image_encoder.parameters():
@@ -1893,7 +1936,6 @@ class PretrainedImageEncoder(nn.Module):
 
     def _load_pretrained_vision_encoder(self, config: FQLVLAConfig):
         """Set up CNN encoder"""
-        from transformers import AutoModel
 
         self.image_enc_layers = AutoModel.from_pretrained(config.vision_encoder_name, trust_remote_code=True)
 

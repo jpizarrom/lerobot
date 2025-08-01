@@ -44,7 +44,6 @@ For more details on the complete HILSerl training workflow, see:
 https://github.com/michel-aractingi/lerobot-hilserl-guide
 """
 
-import einops
 import logging
 import os
 import shutil
@@ -54,7 +53,6 @@ from pathlib import Path
 from pprint import pformat
 
 import grpc
-from tests.rl.test_actor_learner import cfg
 import torch
 from termcolor import colored
 from torch import nn
@@ -73,6 +71,7 @@ from lerobot.constants import (
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
+
 # from lerobot.policies.sac.modeling_sac import SACPolicy
 # from lerobot.policies.fql.modeling_fql import FQLPolicy
 from lerobot.policies.fqlvla.modeling_fqlvla import FQLVLAPolicy
@@ -393,12 +392,18 @@ def add_actor_information_and_train(
 
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2, n_steps=cfg.policy.chunk_size
+                batch_size=batch_size,
+                async_prefetch=async_prefetch,
+                queue_size=2,
+                n_steps=cfg.policy.chunk_size,
             )
 
         if offline_replay_buffer is not None and offline_iterator is None:
             offline_iterator = offline_replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2, n_steps=cfg.policy.chunk_size
+                batch_size=batch_size,
+                async_prefetch=async_prefetch,
+                queue_size=2,
+                n_steps=cfg.policy.chunk_size,
             )
 
         time_for_one_optimization_step = time.time()
@@ -431,7 +436,6 @@ def add_actor_information_and_train(
             done_nsteps = batch["done_nsteps"]
             truncated_nsteps = batch["truncated_nsteps"]
             discount_nsteps = batch["discount_nsteps"]
-            
 
             observation_features, next_observation_features = get_observation_features(
                 policy=policy, observations=observations, next_observations=next_observations
@@ -450,7 +454,6 @@ def add_actor_information_and_train(
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch["complementary_info"],
-
                 "reward_nsteps": reward_nsteps,
                 "next_state_nsteps": next_observation_nsteps,
                 "done_nsteps": done_nsteps,
@@ -534,7 +537,6 @@ def add_actor_information_and_train(
             "done": done,
             "observation_feature": observation_features,
             "next_observation_feature": next_observation_features,
-
             "reward_nsteps": reward_nsteps,
             "next_state_nsteps": next_observation_nsteps,
             "done_nsteps": done_nsteps,
@@ -565,7 +567,7 @@ def add_actor_information_and_train(
         }
 
         if "info" in critic_output:
-            for k,v in critic_output["info"].items():
+            for k, v in critic_output["info"].items():
                 training_infos[f"critic_{k}"] = v.item()
 
         # Discrete critic optimization (if available)
@@ -590,7 +592,6 @@ def add_actor_information_and_train(
         # Actor and temperature optimization (at specified frequency)
         if optimization_step % policy_update_freq == 0:
             for _ in range(policy_update_freq):
-
                 # Actor BC flow optimization
                 actor_bc_flow_output = policy.forward(forward_batch, model="actor_bc_flow")
                 loss_actor_bc_flow = actor_bc_flow_output["loss_actor_bc_flow"]
@@ -606,7 +607,7 @@ def add_actor_information_and_train(
                 training_infos["actor_bc_flow_grad_norm"] = actor_bc_flow_grad_norm
 
                 if "info" in actor_bc_flow_output:
-                    for k,v in actor_bc_flow_output["info"].items():
+                    for k, v in actor_bc_flow_output["info"].items():
                         training_infos[f"actor_bc_flow_{k}"] = v.item()
 
                 # # Actor optimization
@@ -642,7 +643,7 @@ def add_actor_information_and_train(
                 training_infos["actor_onestep_flow_grad_norm"] = actor_onestep_flow_grad_norm
 
                 if "info" in actor_onestep_flow_output:
-                    for k,v in actor_onestep_flow_output["info"].items():
+                    for k, v in actor_onestep_flow_output["info"].items():
                         training_infos[f"actor_onestep_flow_{k}"] = v.item()
 
                 # Temperature optimization
@@ -948,7 +949,7 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
     }
     # if cfg.policy.num_discrete_actions is not None:
     #     optimizers["discrete_critic"] = optimizer_discrete_critic
-        # optimizers["discrete_actor"] = optimizer_discrete_actor
+    # optimizers["discrete_actor"] = optimizer_discrete_actor
     return optimizers, lr_scheduler
 
 
@@ -1183,7 +1184,9 @@ def get_observation_features(
         return None, None
 
     with torch.no_grad():
-        observation_features = policy.actor_onestep_flow.encoder.get_cached_image_features(observations, normalize=True)
+        observation_features = policy.actor_onestep_flow.encoder.get_cached_image_features(
+            observations, normalize=True
+        )
         next_observation_features = policy.actor_onestep_flow.encoder.get_cached_image_features(
             next_observations, normalize=True
         )
@@ -1264,25 +1267,25 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     #     logging.debug("[LEARNER] Including discrete critic in state dict push")
 
     # Add actor_bc_flow if it exists
-    if hasattr(policy, "actor_bc_flow") and policy.actor_bc_flow is not None:
-        state_dicts["actor_bc_flow"] = move_state_dict_to_device(
-            {
-                k: v
-                for k, v in policy.actor_bc_flow.state_dict().items()
-                if not any(
-                    k.startswith(p) for p in ("encoder.vla.model.vlm_with_expert.vlm.",)
-                )
-            },
-            device="cpu",
-        )
-        logging.debug("[LEARNER] Including actor_bc_flow in state dict push")
+    # if hasattr(policy, "actor_bc_flow") and policy.actor_bc_flow is not None:
+    #     state_dicts["actor_bc_flow"] = move_state_dict_to_device(
+    #         {
+    #             k: v
+    #             for k, v in policy.actor_bc_flow.state_dict().items()
+    #             if not any(
+    #                 k.startswith(p) for p in ("encoder.vla.model.vlm_with_expert.vlm.",)
+    #             )
+    #         },
+    #         device="cpu",
+    #     )
+    #     logging.debug("[LEARNER] Including actor_bc_flow in state dict push")
 
     # Add discrete actor if it exists
-    if hasattr(policy, "discrete_actor") and policy.discrete_actor is not None:
-        state_dicts["discrete_actor"] = move_state_dict_to_device(
-            policy.discrete_actor.state_dict(), device="cpu"
-        )
-        logging.debug("[LEARNER] Including discrete actor in state dict push")
+    # if hasattr(policy, "discrete_actor") and policy.discrete_actor is not None:
+    #     state_dicts["discrete_actor"] = move_state_dict_to_device(
+    #         policy.discrete_actor.state_dict(), device="cpu"
+    #     )
+    #     logging.debug("[LEARNER] Including discrete actor in state dict push")
 
     state_bytes = state_to_bytes(state_dicts)
     parameters_queue.put(state_bytes)
