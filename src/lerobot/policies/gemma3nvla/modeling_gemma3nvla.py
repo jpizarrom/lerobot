@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """
-SmolVLA:
+Gemma 3n VLA Policy based SmolVLA implementation.:
 
 [Paper](https://huggingface.co/papers/2506.01844)
 
@@ -26,28 +26,25 @@ Install smolvla extra dependencies:
 pip install -e ".[smolvla]"
 ```
 
-Example of finetuning the smolvla pretrained model (`smolvla_base`):
-```bash
-python lerobot/scripts/train.py \
---policy.path=lerobot/smolvla_base \
---dataset.repo_id=danaaubakirova/svla_so100_task1_v3 \
---batch_size=64 \
---steps=200000
-```
-
-Example of finetuning a smolVLA. SmolVLA is composed of a pretrained VLM,
+Example of finetuning a gemma3nVLA. Gemma3nVLA is composed of a pretrained VLM,
 and an action expert.
 ```bash
-python lerobot/scripts/train.py \
---policy.type=smolvla \
---dataset.repo_id=danaaubakirova/svla_so100_task1_v3 \
---batch_size=64 \
---steps=200000
-```
-
-Example of using the smolvla pretrained model outside LeRobot training framework:
-```python
-policy = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
+python -m lerobot.scripts.train \
+    --dataset.repo_id=jpizarrom/so100_pickplace_20250629_130ep \
+    --batch_size=64 \
+    --policy.type=gemma3nvla \
+    --policy.vlm_model_name=google/gemma-3n-E2B-it \
+    --policy.num_vlm_layers=8 \
+    --policy.max_action_dim=6 \
+    --policy.max_state_dim=6 \
+    --policy.expert_width_multiplier=0.5 \
+    --policy.resize_imgs_with_padding="[256,256]" \
+    --policy.load_vlm_weights=true \
+    --policy.push_to_hub=false \
+    --output_dir="$OUTPUT_DIR" \
+    --steps 200000 \
+    --save_freq 5000 \
+    --policy.device=cuda \
 ```
 
 """
@@ -64,13 +61,13 @@ from torch import Tensor, nn
 from transformers import AutoProcessor
 
 from lerobot.constants import ACTION, OBS_STATE
+from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
+from lerobot.policies.gemma3nvla.gemma3n_with_expert import Gemma3nWithExpertModel
 from lerobot.policies.normalize import (
     Normalize,
     Unnormalize,
 )
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
-from lerobot.policies.gemma3nvla.gemma3n_with_expert import Gemma3nWithExpertModel
 from lerobot.policies.utils import (
     populate_queues,
 )
@@ -169,7 +166,7 @@ def load_smolvla(
     #         len(missing),
     #         len(unexpected),
     #     )
-    
+
     # release memory
     del state_dict
 
@@ -379,7 +376,7 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         # https://github.com/huggingface/transformers/blob/ccf2ca162e33f381e454cdb74bf4b41a51ab976d/src/transformers/trainer.py#L2853
         # We load the model state dict on the CPU to avoid an OOM error.
         state_dict = safetensors.torch.load_file(model_file, device="cpu")
-        load_result = model.load_state_dict(state_dict, strict=False)
+        _ = model.load_state_dict(state_dict, strict=False)
         # release memory
         del state_dict
         # logging.info(f"load_result {load_result}")
