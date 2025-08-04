@@ -13,28 +13,24 @@
 # limitations under the License.
 
 import copy
-from typing import List, Optional
 
 import torch
 from torch import nn
 from transformers import (
     AutoConfig,
     AutoModel,
-    AutoModelForImageTextToText,
     AutoProcessor,
+    Gemma3nConfig,
     # Gemma3nForConditionalGeneration,
     Gemma3nPreTrainedModel,
     GenerationMixin,
-    Gemma3nConfig,
 )
-
 from transformers.models.gemma3n.modeling_gemma3n import (
     Gemma3nMultimodalEmbedder,
-    Gemma3nTextConfig,
-    Gemma3nTextScaledWordEmbedding,
-    Gemma3nTextDecoderLayer,
     Gemma3nRMSNorm,
-    Gemma3nTextRotaryEmbedding,
+    Gemma3nTextConfig,
+    Gemma3nTextDecoderLayer,
+    Gemma3nTextScaledWordEmbedding,
 )
 
 
@@ -70,6 +66,7 @@ def get_intermediate_size(hidden_dim, ffn_dim_multiplier=4, multiple_of=256):
     hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
     return hidden_dim
 
+
 class Gemma3nTextModel(Gemma3nPreTrainedModel):
     config_class = Gemma3nTextConfig
 
@@ -81,7 +78,10 @@ class Gemma3nTextModel(Gemma3nPreTrainedModel):
         # Gemma3n downcasts the below to bfloat16, causing sqrt(3072)=55.4256 to become 55.5. See https://github.com/huggingface/transformers/pull/29402
         if config.vocab_size:
             self.embed_tokens = Gemma3nTextScaledWordEmbedding(
-                config.vocab_size, config.hidden_size, self.padding_idx, embed_scale=self.config.hidden_size**0.5
+                config.vocab_size,
+                config.hidden_size,
+                self.padding_idx,
+                embed_scale=self.config.hidden_size**0.5,
             )
         self.layers = nn.ModuleList(
             [Gemma3nTextDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -136,6 +136,7 @@ class Gemma3nTextModel(Gemma3nPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
+
 
 class Gemma3nModel(Gemma3nPreTrainedModel):
     _checkpoint_conversion_mapping = {}
@@ -194,6 +195,7 @@ class Gemma3nModel(Gemma3nPreTrainedModel):
         vision_outputs *= self.config.vision_config.hidden_size**0.5
         return self.embed_vision(inputs_embeds=vision_outputs)
 
+
 class Gemma3nForConditionalGeneration(Gemma3nPreTrainedModel, GenerationMixin):
     _checkpoint_conversion_mapping = {}
     _tied_weights_keys = ["lm_head.weight"]
@@ -226,7 +228,7 @@ class Gemma3nForConditionalGeneration(Gemma3nPreTrainedModel, GenerationMixin):
     def get_image_features(self, pixel_values):
         return self.model.get_image_features(pixel_values)
 
-    # Make modules available throught conditional class for BC
+    # Make modules available through conditional class for BC
     @property
     def language_model(self):
         return self.model.language_model
@@ -243,7 +245,7 @@ class Gemma3nForConditionalGeneration(Gemma3nPreTrainedModel, GenerationMixin):
 class Gemma3nWithExpertModel(nn.Module):
     def __init__(
         self,
-        model_id: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+        model_id: str = "google/gemma-3n-E2B-it",
         load_vlm_weights: bool = True,
         train_expert_only: bool = True,
         freeze_vision_encoder: bool = False,
@@ -273,21 +275,25 @@ class Gemma3nWithExpertModel(nn.Module):
         self.processor = AutoProcessor.from_pretrained(model_id)
         if num_vlm_layers > 0:
             print(f"Reducing the number of VLM layers to {num_vlm_layers} ...")
-            self.get_vlm_model().language_model.layers = self.get_vlm_model().language_model.layers[:num_vlm_layers]
+            self.get_vlm_model().language_model.layers = self.get_vlm_model().language_model.layers[
+                :num_vlm_layers
+            ]
         self.num_vlm_layers = len(self.get_vlm_model().language_model.layers)
         self.config = config
         # Smaller lm expert
         lm_expert_config = copy.deepcopy(config.text_config)
         hidden_size = lm_expert_config.hidden_size
         lm_expert_config.hidden_size = int(hidden_size * expert_width_multiplier)  # hidden_size // 2
-        lm_expert_config.intermediate_size = [get_intermediate_size(int(hidden_size * expert_width_multiplier))]*self.num_vlm_layers
+        lm_expert_config.intermediate_size = [
+            get_intermediate_size(int(hidden_size * expert_width_multiplier))
+        ] * self.num_vlm_layers
         lm_expert_config.num_hidden_layers = self.num_vlm_layers
         if num_expert_layers > 0:
             assert len(self.get_vlm_model().text_model.layers) % num_expert_layers == 0, (
                 f"Number of layers in the VLM {len(self.get_vlm_model().text_model.layers)} are not multiple of num_expert_layers {num_expert_layers}"
             )
             lm_expert_config.num_hidden_layers = num_expert_layers
-        
+
         lm_expert_config.vocab_size = None
         # self.lm_expert = AutoModel.from_config(lm_expert_config)
         self.lm_expert = Gemma3nTextModel(lm_expert_config)
@@ -383,8 +389,7 @@ class Gemma3nWithExpertModel(nn.Module):
         # patch_attention_mask = None
         # Get sequence from the vision encoder
         image_hidden_states = (
-            self.get_vlm_model()
-            .get_image_features(
+            self.get_vlm_model().get_image_features(
                 pixel_values=image.to(dtype=self.get_vlm_model().vision_tower.dtype),
                 # patch_attention_mask=patch_attention_mask,
             )
@@ -606,12 +611,12 @@ class Gemma3nWithExpertModel(nn.Module):
 
     def forward(
         self,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: List[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        inputs_embeds: list[torch.FloatTensor] = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
     ):
         models = [self.get_vlm_model().language_model, self.lm_expert]
         model_layers = self.get_model_layers(models)
