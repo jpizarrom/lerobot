@@ -400,6 +400,7 @@ class Gemma3nWithExpertModel(nn.Module):
         return image_hidden_states
 
     def embed_language_tokens(self, tokens: torch.Tensor):
+        # TODO: use Per-Layer Embedding
         # return self.get_vlm_model().text_model.get_input_embeddings()(tokens)
         return self.get_vlm_model().language_model.embed_tokens(tokens)
 
