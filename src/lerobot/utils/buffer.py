@@ -344,7 +344,8 @@ class ReplayBuffer:
                 next_idx = (idx + 1) % self.capacity
                 batch_next_state[key] = self.states[key][next_idx].to(self.device)
 
-                batch_next_state_nsteps[key] = self.states[key][last_indices].to(self.device)
+                next_state_nsteps_idx = (last_indices + 1) % self.capacity
+                batch_next_state_nsteps[key] = self.states[key][next_state_nsteps_idx].to(self.device)
 
         # Apply image augmentation in a batched way if needed
         if self.use_drq and image_keys:
