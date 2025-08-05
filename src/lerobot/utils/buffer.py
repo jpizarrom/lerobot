@@ -250,16 +250,19 @@ class ReplayBuffer:
         # Random indices for sampling - create on the same device as storage
         idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
 
-        # Inspired by https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
-        self.n_steps = n_steps
-        self.gamma = 0.99
+        gamma = 0.99  # Default discount factor for n-step returns
+        return self._sample(idx=idx, batch_size=batch_size, gamma=gamma, n_steps=n_steps)
+
+    def _sample(self, idx: torch.Tensor, batch_size: int, gamma:float, n_steps: int | None = None ) -> BatchTransition:
+
+        # Based on https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
 
         last_valid_index = self.position - 1
         original_truncated_values = self.truncateds[last_valid_index].clone()
         self.truncateds[last_valid_index] = torch.logical_or(original_truncated_values, torch.logical_not(self.dones[last_valid_index]))
 
         # Compute n-step indices with wrap-around
-        steps = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
+        steps = torch.arange(n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
         indices = (idx[:, None] + steps) % self.size  # shape: [batch, n_steps]
 
         # Retrieve sequences of transitions
@@ -272,40 +275,40 @@ class ReplayBuffer:
         done_idx = done_or_truncated.int().argmax(axis=1)
         # If no done/truncation, keep full sequence
         has_done_or_truncated = done_or_truncated.any(axis=1)
-        done_idx = torch.where(has_done_or_truncated, done_idx, self.n_steps - 1)
-        # done_idx = torch.where(has_done_or_truncated, done_idx, torch.full_like(done_idx, self.n_steps - 1))
+        done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
+        # done_idx = torch.where(has_done_or_truncated, done_idx, torch.full_like(done_idx, n_steps - 1))
 
-        mask = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]  # shape: [batch, n_steps]
+        mask = torch.arange(n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]  # shape: [batch, n_steps]
         # Compute discount factors for bootstrapping (using target Q-Value)
         # It is gamma ** n_steps by default but should be adjusted in case of early termination/truncation.
-        target_q_discounts = self.gamma ** mask.sum(axis=1, keepdims=True) #.astype(np.float32)  # [batch, 1]
+        target_q_discounts = gamma ** mask.sum(axis=1, keepdims=True) #.astype(np.float32)  # [batch, 1]
 
         # Apply discount
-        discounts = self.gamma ** torch.arange(self.n_steps, dtype=torch.float32, device=self.storage_device) #.reshape(1, -1)  # [1, n_steps]
+        discounts = gamma ** torch.arange(n_steps, dtype=torch.float32, device=self.storage_device) #.reshape(1, -1)  # [1, n_steps]
         discounted_rewards = rewards_seq * discounts * mask
         n_step_returns = discounted_rewards.sum(axis=1, keepdims=True)  # [batch, 1]
 
         # Compute indices of next_obs/done at the final point of the n-step transition
         last_indices = (idx + done_idx) % self.size
         # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
-        # next_dones = self.dones[last_indices, env_indices][:, None].astype(np.float32)
-        # next_timeouts = self.timeouts[last_indices, env_indices][:, None].astype(np.float32)
-        # final_dones = next_dones * (1.0 - next_timeouts)
+        next_dones = self.dones[last_indices].to(self.device).float()
+        next_truncateds = self.truncateds[last_indices].to(self.device).float()
 
         # batch_rewards = self.rewards[idx].to(self.device)
         batch_rewards_nsteps = n_step_returns.to(self.device)
         batch_discounts_nsteps = target_q_discounts.to(self.device)
-        batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
+        # batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
         # batch_dones_nsteps = torch.logical_or(self.dones[last_indices], self.truncateds[last_indices]).to(self.device).float()
+        batch_dones_nsteps = next_dones * (1.0 - next_truncateds)
         batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
 
         # batch_actions [batch, n_steps, ...] copy actions until done_idx, then copy last action
         batch_actions = self.actions[indices] # [batch, n_steps, ...]
         # Create a mask for valid steps (before done/truncation)
-        mask = torch.arange(self.n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]  # [batch, n_steps]
+        mask = torch.arange(n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]  # [batch, n_steps]
         # Expand mask to match action shape
         # Expand mask to match action shape using .view and .expand
-        mask_expanded = mask.view(batch_size, self.n_steps, *([1] * (batch_actions.ndim - 2))).expand_as(batch_actions)
+        mask_expanded = mask.view(batch_size, n_steps, *([1] * (batch_actions.ndim - 2))).expand_as(batch_actions)
         # Mask out actions after done/truncation
         batch_actions = batch_actions * mask_expanded  # Zero out actions after done/truncation
         batch_actions_is_pad = ~mask

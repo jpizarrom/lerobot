@@ -428,7 +428,7 @@ class FQLVLAPolicy(
             # next_actions = next_actions[:, :, :self.actor_onestep_flow.encoder.vla.config.action_feature.shape[0]]
             # next_actions = self.actor_onestep_flow.encoder.vla.unnormalize_outputs({"action": next_actions})["action"]
             # next_actions = self.select_action(next_observations)
-            next_actions = torch.clamp(next_actions, -1.0, 1.0)
+            # next_actions = torch.clamp(next_actions, -1.0, 1.0)
             # next_actions = next_actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
             # continuous_actions = next_actions[:, :, :DISCRETE_DIMENSION_INDEX]
             # discrete_actions = next_actions[:, :, DISCRETE_DIMENSION_INDEX:]
@@ -706,7 +706,7 @@ class FQLVLAPolicy(
         # actor_discrete_actions = torch.clamp(actor_discrete_actions, 0.0, 2.0)
         # actor_actions = torch.cat([actor_continuous_actions, actor_discrete_actions], dim=-1)
         # actor_actions = actor_actions.reshape(batch_size, -1)  # Flatten the action dimension
-        actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
+        # actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
 
         q_preds = self.critic_forward(
             observations=observations,
@@ -1693,7 +1693,7 @@ class ActorVectorFieldPolicyVLA(nn.Module):
 
         # actions = self.encoder.vla.unnormalize_outputs({"action": actions})["action"]
 
-        actions = torch.clamp(actions, -1.0, 1.0)
+        # actions = torch.clamp(actions, -1.0, 1.0)
 
         return actions, None, None  # Return None for log_probs and means as they are not used in this context
 
