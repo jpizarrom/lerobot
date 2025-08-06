@@ -121,14 +121,6 @@ class FQLPolicy(
             vels, _, _ = self.actor_bc_flow(batch, observations_features, actions, t)
             actions = actions + vels / flow_steps
 
-        # actions, discrete_logits = torch.split(actions, [30, 30], dim=-1)
-        # actions = actions.reshape(actions.shape[0], -1, 4)  # Reshape to match action dimensions
-        # continuous_actions = actions[:, :, :3]
-        # discrete_actions = actions[:, :, 3:]
-        # continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
-        # discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
-        # actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
-        # actions = actions.reshape(actions.shape[0], -1)  # Flatten the action dimension
         actions = torch.clamp(actions, -1.0, 1.0)
 
         return actions
@@ -158,12 +150,6 @@ class FQLPolicy(
             actions = actions.reshape(batch_shape, -1, 4)
             actions = torch.clamp(actions, -1.0, 1.0)
             actions = self.unnormalize_targets({"action": actions})["action"]
-            # continuous_actions = actions[:, :, :3]
-            # discrete_actions = actions[:, :, 3:]
-            # continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
-            # discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
-            # actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
-            # actions = actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
 
             self._action_queue.extend(actions.transpose(0, 1))
 
@@ -383,13 +369,7 @@ class FQLPolicy(
             # next_actions = self.select_action(next_observations)
 
             next_actions = torch.clamp(next_actions, -1.0, 1.0)
-            # next_actions = next_actions.reshape(batch_shape, -1, 4)  # Reshape to match action dimensions
-            # continuous_actions = next_actions[:, :, :DISCRETE_DIMENSION_INDEX]
-            # discrete_actions = next_actions[:, :, DISCRETE_DIMENSION_INDEX:]
-            # continuous_actions = torch.clamp(continuous_actions, -1.0, 1.0)
-            # discrete_actions = torch.clamp(discrete_actions, 0.0, 2.0)
-            # next_actions = torch.cat([continuous_actions, discrete_actions], dim=-1)
-            # next_actions = next_actions.reshape(batch_shape, -1)  # Flatten the action dimension
+
 
             # 2- compute q targets
             next_qs = self.critic_forward(
@@ -519,13 +499,6 @@ class FQLPolicy(
         distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
 
         # Q loss.
-        # actor_actions = actor_actions.reshape(batch_size, -1, 4)  # Reshape to match action dimensions
-        # actor_continuous_actions = actor_actions[:, :, :DISCRETE_DIMENSION_INDEX]
-        # actor_discrete_actions = actor_actions[:, :, DISCRETE_DIMENSION_INDEX:]
-        # actor_continuous_actions = torch.clamp(actor_continuous_actions, -1.0, 1.0)
-        # actor_discrete_actions = torch.clamp(actor_discrete_actions, 0.0, 2.0)
-        # actor_actions = torch.cat([actor_continuous_actions, actor_discrete_actions], dim=-1)
-        # actor_actions = actor_actions.reshape(batch_size, -1)  # Flatten the action dimension
         actor_actions = torch.clamp(actor_actions, -1.0, 1.0)
 
         q_preds = self.critic_forward(

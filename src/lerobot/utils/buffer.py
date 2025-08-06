@@ -150,7 +150,7 @@ class ReplayBuffer:
 
         # Pre-allocate tensors for storage
         self.states = {
-            key: torch.empty((self.capacity, *shape), device=self.storage_device)
+            key: torch.zeros((self.capacity, *shape), device=self.storage_device)
             for key, shape in state_shapes.items()
         }
         self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
@@ -263,7 +263,7 @@ class ReplayBuffer:
 
         # Compute n-step indices with wrap-around
         steps = torch.arange(n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
-        indices = (idx[:, None] + steps) % self.size  # shape: [batch, n_steps]
+        indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
 
         # Retrieve sequences of transitions
         rewards_seq = self.rewards[indices]  # [batch, n_steps]
@@ -289,7 +289,7 @@ class ReplayBuffer:
         n_step_returns = discounted_rewards.sum(axis=1, keepdims=True)  # [batch, 1]
 
         # Compute indices of next_obs/done at the final point of the n-step transition
-        last_indices = (idx + done_idx) % self.size
+        last_indices = (idx + done_idx) % self.capacity
         # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
         next_dones = self.dones[last_indices].to(self.device).float()
         next_truncateds = self.truncateds[last_indices].to(self.device).float()
