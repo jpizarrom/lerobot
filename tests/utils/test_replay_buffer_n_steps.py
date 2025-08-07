@@ -1,22 +1,21 @@
 # Based on
 # https://github.com/DLR-RM/stable-baselines3/blob/e206fc55cf7768b8adde3ed3b87c27faa4edf6fe/tests/test_n_step_replay.py
 
-import sys
 from collections.abc import Callable
 
 import pytest
 import torch
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.utils.buffer import BatchTransition, ReplayBuffer, random_crop_vectorized
-from tests.fixtures.constants import DUMMY_REPO_ID
+from lerobot.utils.buffer import ReplayBuffer
 
 
 def state_dims() -> list[str]:
     return ["observation.image", "observation.state"]
 
+
 def clone_state(state: dict) -> dict:
     return {k: v.clone() for k, v in state.items()}
+
 
 def create_empty_replay_buffer(
     optimize_memory: bool = False,
@@ -34,7 +33,10 @@ def create_empty_replay_buffer(
         image_augmentation_function=image_augmentation_function,
     )
 
-def fill_buffer(buffer: ReplayBuffer, length: int, done_at: int | None = None, truncated_at: int | None = None):
+
+def fill_buffer(
+    buffer: ReplayBuffer, length: int, done_at: int | None = None, truncated_at: int | None = None
+):
     """
     Fill the buffer with:
     - reward = 1.0
@@ -63,7 +65,7 @@ def fill_buffer(buffer: ReplayBuffer, length: int, done_at: int | None = None, t
         done = torch.tensor([1.0 if i == done_at else 0.0], dtype=torch.bool)
         truncated = torch.tensor([1.0 if i == truncated_at else 0.0], dtype=torch.bool)
         complementary_info = {}
-        # action 
+        # action
         buffer.add(
             state=clone_state(state),
             next_state=clone_state(next_state),
@@ -73,6 +75,7 @@ def fill_buffer(buffer: ReplayBuffer, length: int, done_at: int | None = None, t
             truncated=truncated,
             complementary_info=complementary_info,
         )
+
 
 def compute_expected_nstep_reward(gamma, n_steps, stop_idx=None):
     """
@@ -89,11 +92,12 @@ def compute_expected_nstep_reward(gamma, n_steps, stop_idx=None):
         returns[step] = last_sum
     return returns[0]
 
+
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("done_at", [1, 2])
 @pytest.mark.parametrize("n_steps", [3, 5])
 @pytest.mark.parametrize("base_idx", [0, 2])
-def test_nstep_early_termination(optimize_memory,done_at, n_steps, base_idx):
+def test_nstep_early_termination(optimize_memory, done_at, n_steps, base_idx):
     gamma = 0.98
     replay_buffer = create_empty_replay_buffer(optimize_memory=optimize_memory)
     fill_buffer(replay_buffer, length=10, done_at=done_at)
@@ -103,6 +107,7 @@ def test_nstep_early_termination(optimize_memory,done_at, n_steps, base_idx):
     expected = compute_expected_nstep_reward(gamma=gamma, n_steps=n_steps, stop_idx=done_at - base_idx)
     torch.testing.assert_close(torch.tensor(actual), torch.tensor(expected), rtol=1e-6, atol=1e-6)
     assert batch["done_nsteps"].item() == float(base_idx <= done_at)
+
 
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("truncated_at", [1, 2])
@@ -118,6 +123,7 @@ def test_nstep_early_truncation(optimize_memory, truncated_at, n_steps, base_idx
     expected = compute_expected_nstep_reward(gamma=0.99, n_steps=n_steps, stop_idx=truncated_at - base_idx)
     torch.testing.assert_close(torch.tensor(actual), torch.tensor(expected), rtol=1e-6, atol=1e-6)
     assert batch["done_nsteps"].item() == 0.0
+
 
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("n_steps", [3, 5])
@@ -157,12 +163,15 @@ def test_nstep_no_terminations(optimize_memory, n_steps):
     torch.testing.assert_close(torch.tensor(actual), torch.tensor(expected), rtol=1e-6, atol=1e-6)
     assert batch["done_nsteps"].item() == 1.0
 
+
 @pytest.mark.parametrize("use_drq", [False, True])
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("done_at", [None, 1, 2])
 @pytest.mark.parametrize("n_steps", [1, 3, 5])
 @pytest.mark.parametrize("base_idx", [0, 1])
-def test_use_drq_early_termination(use_drq: bool, optimize_memory: bool, done_at: int | None, n_steps: int, base_idx: int):
+def test_use_drq_early_termination(
+    use_drq: bool, optimize_memory: bool, done_at: int | None, n_steps: int, base_idx: int
+):
     """
     Test that the replay buffer can handle DRQ-style data augmentation.
     """
@@ -174,7 +183,7 @@ def test_use_drq_early_termination(use_drq: bool, optimize_memory: bool, done_at
 
     # Sample a batch and check if the data augmentation is applied
     batch = buffer._sample(torch.tensor([base_idx]), batch_size=1, gamma=0.99, n_steps=n_steps)
-    
+
     # Check if the augmented data is present
     # assert "observation.image_augmented" in batch
     assert batch["state"]["observation.image"].shape == (1, 3, 84, 84)
@@ -198,12 +207,15 @@ def test_use_drq_early_termination(use_drq: bool, optimize_memory: bool, done_at
         assert batch["next_state_nsteps"]["observation.state"].shape == (1, 4)
         assert batch["next_state_nsteps"]["observation.state"].max() == min(done_at + 1, base_idx + n_steps)
 
+
 @pytest.mark.parametrize("use_drq", [False, True])
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("truncated_at", [None, 1, 2])
 @pytest.mark.parametrize("n_steps", [1, 3, 5])
 @pytest.mark.parametrize("base_idx", [0, 1])
-def test_use_drq_early_truncation(use_drq: bool, optimize_memory: bool, truncated_at: int | None, n_steps: int, base_idx: int):
+def test_use_drq_early_truncation(
+    use_drq: bool, optimize_memory: bool, truncated_at: int | None, n_steps: int, base_idx: int
+):
     """
     Test that the replay buffer can handle DRQ-style data augmentation.
     """
@@ -215,7 +227,7 @@ def test_use_drq_early_truncation(use_drq: bool, optimize_memory: bool, truncate
 
     # Sample a batch and check if the data augmentation is applied
     batch = buffer._sample(torch.tensor([base_idx]), batch_size=1, gamma=0.99, n_steps=n_steps)
-    
+
     # Check if the augmented data is present
     # assert "observation.image_augmented" in batch
     assert batch["state"]["observation.image"].shape == (1, 3, 84, 84)
@@ -235,6 +247,10 @@ def test_use_drq_early_truncation(use_drq: bool, optimize_memory: bool, truncate
         assert batch["next_state_nsteps"]["observation.state"].max() == base_idx + n_steps
     else:
         assert batch["next_state_nsteps"]["observation.image"].shape == (1, 3, 84, 84)
-        assert batch["next_state_nsteps"]["observation.image"].max() == min(truncated_at + 1, base_idx + n_steps)
+        assert batch["next_state_nsteps"]["observation.image"].max() == min(
+            truncated_at + 1, base_idx + n_steps
+        )
         assert batch["next_state_nsteps"]["observation.state"].shape == (1, 4)
-        assert batch["next_state_nsteps"]["observation.state"].max() == min(truncated_at + 1, base_idx + n_steps)
+        assert batch["next_state_nsteps"]["observation.state"].max() == min(
+            truncated_at + 1, base_idx + n_steps
+        )

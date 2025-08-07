@@ -50,8 +50,8 @@ import logging
 import os
 import time
 from functools import lru_cache
-from queue import Empty
 from pprint import pformat
+from queue import Empty
 
 import grpc
 import torch
@@ -62,6 +62,7 @@ from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.policies.factory import make_policy
+
 # from lerobot.policies.sac.modeling_sac import SACPolicy
 # from lerobot.policies.fql.modeling_fql import FQLPolicy
 from lerobot.policies.fqlvla.modeling_fqlvla import FQLVLAPolicy
@@ -236,7 +237,7 @@ def act_with_policy(
         log_file = os.path.join(log_dir, f"actor_policy_{os.getpid()}.log")
         init_logging(log_file=log_file, display_pid=True)
         logging.info("Actor policy process logging initialized")
-    
+
     logging.info(pformat(cfg.to_dict()))
 
     logging.info("make_env online")
@@ -292,7 +293,7 @@ def act_with_policy(
             # action = action.unsqueeze(0) # TODO: Handle batch chunking/batching
 
         next_obs, reward, done, truncated, info = online_env.step(action)
-        
+
         # next_obs["observation.state"] = next_obs["observation.state"].unsqueeze(1)  # Add a batch dimension
 
         sum_reward_episode += float(reward)
@@ -363,7 +364,6 @@ def act_with_policy(
             episode_total_steps = 0
             policy.reset()  # Reset policy state if needed
             obs, info = online_env.reset()
-            
 
         if cfg.env.fps is not None:
             dt_time = time.perf_counter() - start_time
@@ -660,9 +660,7 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
 
         # Load actor_bc_flow if present
         if hasattr(policy, "actor_bc_flow") and "actor_bc_flow" in state_dicts:
-            actor_bc_flow_state_dict = move_state_dict_to_device(
-                state_dicts["actor_bc_flow"], device=device
-            )
+            actor_bc_flow_state_dict = move_state_dict_to_device(state_dicts["actor_bc_flow"], device=device)
             policy.actor_bc_flow.load_state_dict(actor_bc_flow_state_dict, strict=False)
             logging.info("[ACTOR] Loaded actor_bc_flow parameters from Learner.")
 

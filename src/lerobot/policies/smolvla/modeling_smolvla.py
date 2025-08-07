@@ -61,11 +61,7 @@ import safetensors
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
-from transformers import AutoProcessor
 from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForImageTextToText,
     AutoProcessor,
     SmolVLMForConditionalGeneration,
 )
@@ -427,7 +423,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
         state = self.prepare_state(batch)
         lang_tokens, lang_masks = self.prepare_language(batch)
 
-        actions = self.model.sample_actions_onestep(images, img_masks, lang_tokens, lang_masks, state, noise=noise)
+        actions = self.model.sample_actions_onestep(
+            images, img_masks, lang_tokens, lang_masks, state, noise=noise
+        )
 
         # Unpad actions
         original_action_dim = self.config.action_feature.shape[0]
@@ -519,10 +517,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions_is_pad = batch.get("actions_is_pad")
 
         loss_dict = {}
-        losses, v_t = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        losses, v_t = self.model.forward(
+            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
+        )
         loss_dict["losses_after_forward"] = losses.clone()
-
-        
 
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
@@ -1016,7 +1014,9 @@ class VLAFlowMatching(nn.Module):
         do_action_out_proj=True,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep, chunk_size=chunk_size)
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
+            x_t, timestep, chunk_size=chunk_size
+        )
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
@@ -1054,9 +1054,9 @@ class VLAFlowMatching(nn.Module):
         if noise is None:
             actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
-        
+
         # time = self.sample_time(noise.shape[0], noise.device)
-        
+
         x_t = noise
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(

@@ -64,12 +64,14 @@ class CriticNetworkConfig:
     default_init: float | None = None
     init_final: float | None = None
 
+
 @dataclass
 class ActorNetworkConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
     activate_final: bool = False
     layer_norm: bool = False
     default_init: float | None = None
+
 
 @dataclass
 class PolicyConfig:
@@ -79,16 +81,20 @@ class PolicyConfig:
     # init_final: float = 0.05
     init_final: float | None = None
 
+
 @dataclass
 class DiscreteActorNetworkConfig:
     """Configuration for the discrete actor network."""
+
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
     activate_final: bool = True
     layer_norm: bool = False
 
+
 @dataclass
 class DiscretePolicyConfig:
     """Configuration for the discrete policy."""
+
     init_final: float | None = None
 
 
@@ -214,7 +220,9 @@ class FQLConfig(PreTrainedConfig):
     # Configuration for the actor network architecture
     actor_network_kwargs: ActorNetworkConfig = field(default_factory=ActorNetworkConfig)
     # Configuration for the discrete actor network architecture
-    discrete_actor_network_kwargs: DiscreteActorNetworkConfig = field(default_factory=DiscreteActorNetworkConfig)
+    discrete_actor_network_kwargs: DiscreteActorNetworkConfig = field(
+        default_factory=DiscreteActorNetworkConfig
+    )
     # Configuration for the policy parameters
     policy_kwargs: PolicyConfig = field(default_factory=PolicyConfig)
     # Configuration for the discrete policy

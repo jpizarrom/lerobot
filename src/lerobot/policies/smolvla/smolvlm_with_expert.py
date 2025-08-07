@@ -17,9 +17,7 @@ import copy
 import torch
 from torch import nn
 from transformers import (
-    AutoConfig,
     AutoModel,
-    AutoModelForImageTextToText,
     AutoProcessor,
     SmolVLMForConditionalGeneration,
 )
