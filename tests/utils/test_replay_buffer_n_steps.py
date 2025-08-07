@@ -95,8 +95,8 @@ def compute_expected_nstep_reward(gamma, n_steps, stop_idx=None):
 
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("done_at", [1, 2])
-@pytest.mark.parametrize("n_steps", [3, 5])
-@pytest.mark.parametrize("base_idx", [0, 2])
+@pytest.mark.parametrize("n_steps", [2, 3, 5])
+@pytest.mark.parametrize("base_idx", [0, 1, 2, 3])
 def test_nstep_early_termination(optimize_memory, done_at, n_steps, base_idx):
     gamma = 0.98
     replay_buffer = create_empty_replay_buffer(optimize_memory=optimize_memory)
@@ -106,13 +106,20 @@ def test_nstep_early_termination(optimize_memory, done_at, n_steps, base_idx):
     actual = batch["reward_nsteps"].item()
     expected = compute_expected_nstep_reward(gamma=gamma, n_steps=n_steps, stop_idx=done_at - base_idx)
     torch.testing.assert_close(torch.tensor(actual), torch.tensor(expected), rtol=1e-6, atol=1e-6)
-    assert batch["done_nsteps"].item() == float(base_idx <= done_at)
+    assert batch["done_nsteps"].item() == float(base_idx <= done_at and done_at < base_idx + n_steps)
+    assert batch["truncated_nsteps"].item() == 0.0
+
+    expected_action_is_pad = torch.zeros((1, n_steps), dtype=torch.bool)
+    if done_at >= base_idx:
+        start_idx = min(done_at + 1 - base_idx, base_idx + n_steps)
+        expected_action_is_pad[0, start_idx:] = True
+    assert torch.equal(batch["action_is_pad"], expected_action_is_pad)
 
 
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("truncated_at", [1, 2])
-@pytest.mark.parametrize("n_steps", [2, 5])
-@pytest.mark.parametrize("base_idx", [0, 1])
+@pytest.mark.parametrize("n_steps", [2, 3, 5])
+@pytest.mark.parametrize("base_idx", [0, 1, 2, 3])
 def test_nstep_early_truncation(optimize_memory, truncated_at, n_steps, base_idx):
     replay_buffer = create_empty_replay_buffer(optimize_memory=optimize_memory)
     fill_buffer(replay_buffer, length=10, truncated_at=truncated_at)
@@ -123,6 +130,15 @@ def test_nstep_early_truncation(optimize_memory, truncated_at, n_steps, base_idx
     expected = compute_expected_nstep_reward(gamma=0.99, n_steps=n_steps, stop_idx=truncated_at - base_idx)
     torch.testing.assert_close(torch.tensor(actual), torch.tensor(expected), rtol=1e-6, atol=1e-6)
     assert batch["done_nsteps"].item() == 0.0
+    assert batch["truncated_nsteps"].item() == float(
+        base_idx <= truncated_at and truncated_at < base_idx + n_steps
+    )
+
+    expected_action_is_pad = torch.zeros((1, n_steps), dtype=torch.bool)
+    if truncated_at >= base_idx:
+        start_idx = min(truncated_at + 1 - base_idx, base_idx + n_steps)
+        expected_action_is_pad[0, start_idx:] = True
+    assert torch.equal(batch["action_is_pad"], expected_action_is_pad)
 
 
 @pytest.mark.parametrize("optimize_memory", [False, True])
@@ -168,7 +184,7 @@ def test_nstep_no_terminations(optimize_memory, n_steps):
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("done_at", [None, 1, 2])
 @pytest.mark.parametrize("n_steps", [1, 3, 5])
-@pytest.mark.parametrize("base_idx", [0, 1])
+@pytest.mark.parametrize("base_idx", [0, 1, 3])
 def test_use_drq_early_termination(
     use_drq: bool, optimize_memory: bool, done_at: int | None, n_steps: int, base_idx: int
 ):
@@ -212,7 +228,7 @@ def test_use_drq_early_termination(
 @pytest.mark.parametrize("optimize_memory", [False, True])
 @pytest.mark.parametrize("truncated_at", [None, 1, 2])
 @pytest.mark.parametrize("n_steps", [1, 3, 5])
-@pytest.mark.parametrize("base_idx", [0, 1])
+@pytest.mark.parametrize("base_idx", [0, 1, 3])
 def test_use_drq_early_truncation(
     use_drq: bool, optimize_memory: bool, truncated_at: int | None, n_steps: int, base_idx: int
 ):
