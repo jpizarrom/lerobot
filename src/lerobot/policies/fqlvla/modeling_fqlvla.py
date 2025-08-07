@@ -102,7 +102,7 @@ class FQLVLAPolicy(
         """Reset the policy"""
         # self.actor_bc_flow.encoder.vla.reset()
         # self.actor_onestep_flow.encoder.vla.reset()
-        self._action_queue = deque([], maxlen=self.config.chunk_size)
+        self._action_queue = deque([], maxlen=self.config.n_action_steps)
 
     @torch.no_grad
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
@@ -167,7 +167,7 @@ class FQLVLAPolicy(
             # actions = self.actor_bc_flow.encoder.vla.unnormalize_outputs({"action":actions})["action"]
             actions = self.unnormalize_targets({"action": actions})["action"]
 
-            self._action_queue.extend(actions.transpose(0, 1))
+            self._action_queue.extend(actions.transpose(0, 1)[: self.config.n_action_steps])
 
         actions = self._action_queue.popleft()
 
@@ -577,11 +577,11 @@ class FQLVLAPolicy(
         """Initialize shared or separate encoders for actor and critic."""
         self.shared_encoder = self.config.shared_encoder
         self.encoder_critic = SACObservationEncoder(self.config, self.normalize_inputs)
-        self.encoder_discrete_critic = (
-            self.encoder_critic
-            if self.shared_encoder
-            else SACObservationEncoder(self.config, self.normalize_inputs)
-        )
+        # self.encoder_discrete_critic = (
+        #     self.encoder_critic
+        #     if self.shared_encoder
+        #     else SACObservationEncoder(self.config, self.normalize_inputs)
+        # )
 
         cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
         # cfg_policy.n_obs_steps: int = 1

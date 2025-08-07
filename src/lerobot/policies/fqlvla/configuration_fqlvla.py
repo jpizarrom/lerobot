@@ -107,7 +107,7 @@ class FQLVLAConfig(PreTrainedConfig):
     """
 
     chunk_size: int = 50
-    # n_action_steps: int = 50
+    n_action_steps: int = 10
 
     # Mapping of feature types to normalization modes
     normalization_mapping: dict[str, NormalizationMode] = field(
