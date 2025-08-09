@@ -153,13 +153,13 @@ class ReplayBuffer:
             key: torch.zeros((self.capacity, *shape), device=self.storage_device)
             for key, shape in state_shapes.items()
         }
-        self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
-        self.rewards = torch.empty((self.capacity,), device=self.storage_device)
+        self.actions = torch.zeros((self.capacity, *action_shape), device=self.storage_device)
+        self.rewards = torch.zeros((self.capacity,), device=self.storage_device)
 
         if not self.optimize_memory:
             # Standard approach: store states and next_states separately
             self.next_states = {
-                key: torch.empty((self.capacity, *shape), device=self.storage_device)
+                key: torch.zeros((self.capacity, *shape), device=self.storage_device)
                 for key, shape in state_shapes.items()
             }
         else:
@@ -167,8 +167,8 @@ class ReplayBuffer:
             # Just create a reference to states for consistent API
             self.next_states = self.states  # Just a reference for API consistency
 
-        self.dones = torch.empty((self.capacity,), dtype=torch.bool, device=self.storage_device)
-        self.truncateds = torch.empty((self.capacity,), dtype=torch.bool, device=self.storage_device)
+        self.dones = torch.zeros((self.capacity,), dtype=torch.bool, device=self.storage_device)
+        self.truncateds = torch.zeros((self.capacity,), dtype=torch.bool, device=self.storage_device)
 
         # Initialize storage for complementary_info
         self.has_complementary_info = complementary_info is not None
@@ -237,7 +237,9 @@ class ReplayBuffer:
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(self, batch_size: int, n_steps: int | None = None) -> BatchTransition:
+    def sample(
+        self, batch_size: int, n_steps: int | None = None, gamma: float | None = None
+    ) -> BatchTransition:
         """Sample a random batch of transitions and collate them into batched tensors."""
         if not self.initialized:
             raise RuntimeError("Cannot sample from an empty buffer. Add transitions first.")
@@ -250,7 +252,6 @@ class ReplayBuffer:
         # Random indices for sampling - create on the same device as storage
         idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
 
-        gamma = 0.99  # Default discount factor for n-step returns
         return self._sample(idx=idx, batch_size=batch_size, gamma=gamma, n_steps=n_steps)
 
     def _sample(
@@ -266,6 +267,34 @@ class ReplayBuffer:
 
         # Compute n-step indices with wrap-around
         steps = torch.arange(n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
+
+        # # filter out indices that lead to done/truncated states before n_steps
+        # # TODO: support when episode ends before n_steps
+        # high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
+
+        # def filter_valid_indices(idx: torch.Tensor) -> torch.Tensor:
+        #     indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+        #     dones_seq = self.dones[indices]  # [batch, n_steps]
+        #     truncated_seq = self.truncateds[indices]  # [batch, n_steps]
+
+        #     # Compute masks: 1 until first done/truncation (inclusive)
+        #     done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
+        #     done_idx = done_or_truncated.int().argmax(axis=1)
+        #     # If no done/truncation, keep full sequence
+        #     has_done_or_truncated = done_or_truncated.any(axis=1)
+        #     done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
+
+        #     return idx[done_idx == n_steps - 1]
+
+        # idx = filter_valid_indices(idx)
+        # while len(idx) < batch_size:
+        #     # If not enough valid indices, sample some again
+        #     new_idx = torch.randint(
+        #         low=0, high=high, size=(batch_size - len(idx),), device=self.storage_device
+        #     )
+        #     idx = torch.cat((idx, new_idx), dim=0)
+        #     idx = filter_valid_indices(idx)
+
         indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
 
         # Retrieve sequences of transitions
@@ -298,15 +327,15 @@ class ReplayBuffer:
         # Compute indices of next_obs/done at the final point of the n-step transition
         last_indices = (idx + done_idx) % self.capacity
         # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
-        next_dones = self.dones[last_indices].to(self.device).float()
-        next_truncateds = self.truncateds[last_indices].to(self.device).float()
+        # next_dones = self.dones[last_indices].to(self.device).float()
+        # next_truncateds = self.truncateds[last_indices].to(self.device).float()
 
         # batch_rewards = self.rewards[idx].to(self.device)
         batch_rewards_nsteps = n_step_returns.to(self.device)
         batch_discounts_nsteps = target_q_discounts.to(self.device)
-        # batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
+        batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
         # batch_dones_nsteps = torch.logical_or(self.dones[last_indices], self.truncateds[last_indices]).to(self.device).float()
-        batch_dones_nsteps = next_dones * (1.0 - next_truncateds)
+        # batch_dones_nsteps = next_dones * (1.0 - next_truncateds)
         batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
 
         # batch_actions [batch, n_steps, ...] copy actions until done_idx, then copy last action
@@ -355,7 +384,10 @@ class ReplayBuffer:
                 next_idx = (idx + 1) % self.capacity
                 batch_next_state[key] = self.states[key][next_idx].to(self.device)
 
-                next_state_nsteps_idx = (last_indices + 1) % self.capacity
+                # TODO: handle last position
+                next_state_nsteps_idx = (
+                    torch.where(has_done_or_truncated, idx + done_idx, idx + done_idx + 1) % self.capacity
+                )
                 batch_next_state_nsteps[key] = self.states[key][next_state_nsteps_idx].to(self.device)
 
         # Apply image augmentation in a batched way if needed
@@ -442,6 +474,7 @@ class ReplayBuffer:
         async_prefetch: bool = True,
         queue_size: int = 2,
         n_steps: int | None = None,
+        gamma: float | None = None,
     ):
         """
         Creates an infinite iterator that yields batches of transitions.
@@ -459,18 +492,20 @@ class ReplayBuffer:
             if async_prefetch:
                 # Get the standard iterator
                 iterator = self._get_async_iterator(
-                    queue_size=queue_size, batch_size=batch_size, n_steps=n_steps
+                    queue_size=queue_size, batch_size=batch_size, n_steps=n_steps, gamma=gamma
                 )
             else:
                 iterator = self._get_naive_iterator(
-                    batch_size=batch_size, queue_size=queue_size, n_steps=n_steps
+                    batch_size=batch_size, queue_size=queue_size, n_steps=n_steps, gamma=gamma
                 )
 
             # Yield all items from the iterator
             with suppress(StopIteration):
                 yield from iterator
 
-    def _get_async_iterator(self, batch_size: int, queue_size: int = 2, n_steps: int | None = None):
+    def _get_async_iterator(
+        self, batch_size: int, queue_size: int = 2, n_steps: int | None = None, gamma: float | None = None
+    ):
         """
         Create an iterator that continuously yields prefetched batches in a
         background thread. The design is intentionally simple and avoids busy
@@ -494,7 +529,7 @@ class ReplayBuffer:
             """Continuously put sampled batches into the queue until shutdown."""
             while not shutdown_event.is_set():
                 try:
-                    batch = self.sample(batch_size, n_steps=n_steps)
+                    batch = self.sample(batch_size, n_steps=n_steps, gamma=gamma)
                     # The timeout ensures the thread unblocks if the queue is full
                     # and the shutdown event gets set meanwhile.
                     data_queue.put(batch, block=True, timeout=0.5)
@@ -524,7 +559,9 @@ class ReplayBuffer:
             # Give the producer thread a bit of time to finish.
             producer_thread.join(timeout=1.0)
 
-    def _get_naive_iterator(self, batch_size: int, queue_size: int = 2, n_steps: int | None = None):
+    def _get_naive_iterator(
+        self, batch_size: int, queue_size: int = 2, n_steps: int | None = None, gamma: float | None = None
+    ):
         """
         Creates a simple non-threaded iterator that yields batches.
 
@@ -541,7 +578,7 @@ class ReplayBuffer:
 
         def enqueue(n):
             for _ in range(n):
-                data = self.sample(batch_size, n_steps=n_steps)
+                data = self.sample(batch_size, n_steps=n_steps, gamma=gamma)
                 queue.append(data)
 
         enqueue(queue_size)
