@@ -164,20 +164,20 @@ def load_smolvla(
     norm_keys = ("normalize_inputs", "normalize_targets", "unnormalize_outputs")
     state_dict = {k: v for k, v in state_dict.items() if not k.startswith(norm_keys)}
 
-    # state_dict["model.state_proj.weight"] = state_dict["model.state_proj.weight"][
-    #     :, : model.config.max_state_dim
-    # ]
+    state_dict["model.state_proj.weight"] = state_dict["model.state_proj.weight"][
+        :, : model.config.max_state_dim
+    ]
 
-    # state_dict["model.action_in_proj.weight"] = state_dict["model.action_in_proj.weight"][
-    #     :, : model.config.max_action_dim
-    # ]
+    state_dict["model.action_in_proj.weight"] = state_dict["model.action_in_proj.weight"][
+        :, : model.config.max_action_dim
+    ]
 
-    # state_dict["model.action_out_proj.weight"] = state_dict["model.action_out_proj.weight"][
-    #     : model.config.max_action_dim, :
-    # ]
-    # state_dict["model.action_out_proj.bias"] = state_dict["model.action_out_proj.bias"][
-    #     : model.config.max_action_dim
-    # ]
+    state_dict["model.action_out_proj.weight"] = state_dict["model.action_out_proj.weight"][
+        : model.config.max_action_dim, :
+    ]
+    state_dict["model.action_out_proj.bias"] = state_dict["model.action_out_proj.bias"][
+        : model.config.max_action_dim
+    ]
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 

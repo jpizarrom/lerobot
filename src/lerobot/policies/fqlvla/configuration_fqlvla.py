@@ -115,6 +115,10 @@ class FQLVLAConfig(PreTrainedConfig):
     chunk_size: int = 50
     n_action_steps: int = 10
 
+    # Shorter state and action vectors will be padded
+    max_state_dim: int = 32
+    max_action_dim: int = 32
+
     # Mapping of feature types to normalization modes
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {

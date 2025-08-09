@@ -722,8 +722,8 @@ class FQLVLAPolicy(
         cfg_policy.chunk_size = self.config.chunk_size
         cfg_policy.n_action_steps = self.config.chunk_size
         # cfg_policy.train_state_proj = False
-        # cfg_policy.max_action_dim = 3
-        # cfg_policy.max_state_dim = 18
+        cfg_policy.max_action_dim = self.config.max_action_dim
+        cfg_policy.max_state_dim = self.config.max_state_dim
 
         cfg_policy.normalization_mapping = {
             "VISUAL": NormalizationMode.IDENTITY,
