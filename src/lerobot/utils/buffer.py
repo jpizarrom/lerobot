@@ -268,32 +268,32 @@ class ReplayBuffer:
         # Compute n-step indices with wrap-around
         steps = torch.arange(n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
 
-        # # filter out indices that lead to done/truncated states before n_steps
-        # # TODO: support when episode ends before n_steps
-        # high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
+        # filter out indices that lead to done/truncated states before n_steps
+        # TODO: support when episode ends before n_steps
+        high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
 
-        # def filter_valid_indices(idx: torch.Tensor) -> torch.Tensor:
-        #     indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
-        #     dones_seq = self.dones[indices]  # [batch, n_steps]
-        #     truncated_seq = self.truncateds[indices]  # [batch, n_steps]
+        def filter_valid_indices(idx: torch.Tensor) -> torch.Tensor:
+            indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+            dones_seq = self.dones[indices]  # [batch, n_steps]
+            truncated_seq = self.truncateds[indices]  # [batch, n_steps]
 
-        #     # Compute masks: 1 until first done/truncation (inclusive)
-        #     done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
-        #     done_idx = done_or_truncated.int().argmax(axis=1)
-        #     # If no done/truncation, keep full sequence
-        #     has_done_or_truncated = done_or_truncated.any(axis=1)
-        #     done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
+            # Compute masks: 1 until first done/truncation (inclusive)
+            done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
+            done_idx = done_or_truncated.int().argmax(axis=1)
+            # If no done/truncation, keep full sequence
+            has_done_or_truncated = done_or_truncated.any(axis=1)
+            done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
 
-        #     return idx[done_idx == n_steps - 1]
+            return idx[done_idx == n_steps - 1]
 
-        # idx = filter_valid_indices(idx)
-        # while len(idx) < batch_size:
-        #     # If not enough valid indices, sample some again
-        #     new_idx = torch.randint(
-        #         low=0, high=high, size=(batch_size - len(idx),), device=self.storage_device
-        #     )
-        #     idx = torch.cat((idx, new_idx), dim=0)
-        #     idx = filter_valid_indices(idx)
+        idx = filter_valid_indices(idx)
+        while len(idx) < batch_size:
+            # If not enough valid indices, sample some again
+            new_idx = torch.randint(
+                low=0, high=high, size=(batch_size - len(idx),), device=self.storage_device
+            )
+            idx = torch.cat((idx, new_idx), dim=0)
+            idx = filter_valid_indices(idx)
 
         indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
 

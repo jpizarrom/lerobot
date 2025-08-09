@@ -425,14 +425,15 @@ class FQLPolicy(
         # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
         td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
         # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
+
+        q_preds = q_preds[:, ~actions_is_pad[:, -1]]
+        td_target_duplicate = td_target_duplicate[:, ~actions_is_pad[:, -1]]
+
         critics_loss = (
-            (
-                F.mse_loss(
-                    input=q_preds,
-                    target=td_target_duplicate,
-                    reduction="none",
-                )
-                * ~actions_is_pad[:, -1]
+            F.mse_loss(
+                input=q_preds,
+                target=td_target_duplicate,
+                reduction="none",
             ).mean(dim=1)
         ).sum()
 
@@ -441,6 +442,7 @@ class FQLPolicy(
             "predicted_qs": torch.mean(q_preds),
             "target_qs": torch.mean(td_target_duplicate),
             "rewards": rewards.mean(),
+            "actions_is_pad": torch.mean(actions_is_pad.float()),
             # "discrete_critic_loss": discrete_critic_loss,
             # "discrete_predicted_qs": torch.mean(predicted_discrete_qs),
             # "discrete_target_qs": torch.mean(target_discrete_q_duplicate),
