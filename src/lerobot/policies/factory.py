@@ -34,6 +34,7 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 
@@ -84,6 +85,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
         return SmolVLAPolicy
+    elif name == "gemma3nvla":
+        from lerobot.policies.gemma3nvla.modeling_gemma3nvla import Gemma3nVLAPolicy
+
+        return Gemma3nVLAPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -109,6 +114,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return FQLVLAConfig(**kwargs)
     elif policy_type == "smolvla":
         return SmolVLAConfig(**kwargs)
+    elif policy_type == "gemma3nvla":
+        return Gemma3nVLAConfig(**kwargs)
     elif policy_type == "reward_classifier":
         return RewardClassifierConfig(**kwargs)
     else:
@@ -179,6 +186,11 @@ def make_policy(
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time
         # hyperparameters that we want to vary).
         kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+        if hasattr(cfg, "revision") and cfg.revision is not None:
+            # If revision is set, we load the policy from a specific revision.
+            # This is useful for loading a specific version of a policy.
+            logging.info(f"Loading policy from revision {cfg.revision}.")
+            kwargs["revision"] = cfg.revision
         policy = policy_cls.from_pretrained(**kwargs)
     else:
         # Make a fresh policy.

@@ -140,6 +140,12 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
                 model.to(map_location)
         else:
             safetensors.torch.load_model(model, model_file, strict=strict, device=map_location)
+            # # https://github.com/huggingface/transformers/blob/ccf2ca162e33f381e454cdb74bf4b41a51ab976d/src/transformers/trainer.py#L2853
+            # state_dict = safetensors.torch.load_file(model_file, device="cpu")
+            # load_result = model.load_state_dict(state_dict, strict=False)
+            # # release memory
+            # del state_dict
+            # logging.info(f"load_result {load_result}")
         return model
 
     @abc.abstractmethod
