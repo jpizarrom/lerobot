@@ -72,7 +72,8 @@ class FQLVLAPolicy(
         self._init_normalization(dataset_stats)
         self._init_encoders()
         self._init_critics(continuous_action_dim)
-        self._init_actor_bc_flow(continuous_action_dim)
+        if not config.no_bc_policy:
+            self._init_actor_bc_flow(continuous_action_dim)
         self._init_actor_onestep_flow(continuous_action_dim)
         self._init_temperature()
 
@@ -716,68 +717,71 @@ class FQLVLAPolicy(
         #     if self.shared_encoder
         #     else SACObservationEncoder(self.config, self.normalize_inputs)
         # )
+        if not self.config.no_bc_policy:
+            cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
+            # cfg_policy.n_obs_steps: int = 1
+            cfg_policy.chunk_size = self.config.chunk_size
+            cfg_policy.n_action_steps = self.config.chunk_size
+            # cfg_policy.train_state_proj = False
+            cfg_policy.max_action_dim = self.config.max_action_dim
+            cfg_policy.max_state_dim = self.config.max_state_dim
+            cfg_policy.num_vlm_layers = 8
+            cfg_policy.expert_width_multiplier = 0.5
 
-        cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
-        # cfg_policy.n_obs_steps: int = 1
-        cfg_policy.chunk_size = self.config.chunk_size
-        cfg_policy.n_action_steps = self.config.chunk_size
-        # cfg_policy.train_state_proj = False
-        cfg_policy.max_action_dim = self.config.max_action_dim
-        cfg_policy.max_state_dim = self.config.max_state_dim
+            cfg_policy.normalization_mapping = {
+                "VISUAL": NormalizationMode.IDENTITY,
+                "STATE": NormalizationMode.MIN_MAX,
+                # "ENV": NormalizationMode.MIN_MAX,
+                # "ACTION": NormalizationMode.MIN_MAX,
+                "ACTION": NormalizationMode.IDENTITY,
+            }
+            kwargs = {}
+            # kwargs["pretrained_name_or_path"] = "lerobot/smolvla_base"
 
-        cfg_policy.normalization_mapping = {
-            "VISUAL": NormalizationMode.IDENTITY,
-            "STATE": NormalizationMode.MIN_MAX,
-            # "ENV": NormalizationMode.MIN_MAX,
-            # "ACTION": NormalizationMode.MIN_MAX,
-            "ACTION": NormalizationMode.IDENTITY,
-        }
-        kwargs = {}
-        # kwargs["pretrained_name_or_path"] = "lerobot/smolvla_base"
+            # from lerobot.configs.train import TrainRLServerPipelineConfig
+            # from lerobot.datasets.factory import make_dataset
 
-        # from lerobot.configs.train import TrainRLServerPipelineConfig
-        # from lerobot.datasets.factory import make_dataset
+            # cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
+            # cfg.policy.chunk_size = self.config.chunk_size
+            # offline_dataset = make_dataset(cfg)
+            # for k in ["min", "max", "mean", "std"]:
+            #     offline_dataset.meta.stats["action"][k] = offline_dataset.meta.stats["action"][k][:-1]
+            # kwargs["dataset_stats"] = offline_dataset.meta.stats
+            kwargs["dataset_stats"] = _convert_normalization_params_to_tensor(self.config.dataset_stats)
+            # features = env_to_policy_features(cfg.env)
+            cfg_policy.output_features = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))}
+            cfg_policy.input_features = {
+                "observation.images.front": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+                "observation.images.wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+                "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(18,)),
+            }
+            # cfg_policy.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+            # cfg_policy.input_features = {key: ft for key, ft in features.items() if key not in cfg_policy.output_features}
+            kwargs["config"] = cfg_policy
 
-        # cfg = TrainRLServerPipelineConfig.from_pretrained("/home/jpizarrom/Projects/lerobot-hil-serl-configs/fql/train_gym_hil_env_fqlvla_lilkm_pushfreq50.json")
-        # cfg.policy.chunk_size = self.config.chunk_size
-        # offline_dataset = make_dataset(cfg)
-        # for k in ["min", "max", "mean", "std"]:
-        #     offline_dataset.meta.stats["action"][k] = offline_dataset.meta.stats["action"][k][:-1]
-        # kwargs["dataset_stats"] = offline_dataset.meta.stats
-        kwargs["dataset_stats"] = _convert_normalization_params_to_tensor(self.config.dataset_stats)
-        # features = env_to_policy_features(cfg.env)
-        cfg_policy.output_features = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(4,))}
-        cfg_policy.input_features = {
-            "observation.images.front": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
-            "observation.images.wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(18,)),
-        }
-        # cfg_policy.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
-        # cfg_policy.input_features = {key: ft for key, ft in features.items() if key not in cfg_policy.output_features}
-        kwargs["config"] = cfg_policy
+            self.vlm: SmolVLMForConditionalGeneration = AutoModelForImageTextToText.from_pretrained(
+                pretrained_model_name_or_path="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+                device_map="auto",
+                torch_dtype="bfloat16",
+                low_cpu_mem_usage=True,
+            )
+            # self.vlm.model.text_model.layers = self.vlm.model.text_model.layers[:cfg_policy.num_vlm_layers]
 
-        self.vlm: SmolVLMForConditionalGeneration = AutoModelForImageTextToText.from_pretrained(
-            pretrained_model_name_or_path="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
-            device_map="auto",
-            torch_dtype="bfloat16",
-            low_cpu_mem_usage=True,
-        )
-        # self.vlm.model.text_model.layers = self.vlm.model.text_model.layers[:cfg_policy.num_vlm_layers]
+            # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy(vlm=self.vlm, **kwargs))
+            # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
+            self.encoder_actor_bc_flow = SACObservationEncoderVLA(
+                self.config,
+                # SmolVLAPolicy.from_pretrained(
+                #     pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs
+                # ),
+                SmolVLAPolicy(vlm=self.vlm, **kwargs),
+            )
 
-        # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy(vlm=self.vlm, **kwargs))
-        # self.encoder_actor_onestep_flow = SACObservationEncoderVLA(self.config, SmolVLAPolicy.from_pretrained(pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs))
-        self.encoder_actor_bc_flow = SACObservationEncoderVLA(
-            self.config,
-            SmolVLAPolicy.from_pretrained(
-                pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs
-            ),
-        )
-
-        # self.encoder_actor_bc_flow = (
-        #     self.encoder_critic
-        #     if self.shared_encoder
-        #     else SACObservationEncoder(self.config, self.normalize_inputs)
-        # )
+            # self.encoder_actor_bc_flow = (
+            #     self.encoder_critic
+            #     if self.shared_encoder
+            #     else SACObservationEncoder(self.config, self.normalize_inputs)
+            # )
 
         self.encoder_actor_onestep_flow = (
             self.encoder_critic

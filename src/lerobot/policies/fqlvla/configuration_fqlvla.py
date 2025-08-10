@@ -119,6 +119,8 @@ class FQLVLAConfig(PreTrainedConfig):
     max_state_dim: int = 32
     max_action_dim: int = 32
 
+    no_bc_policy: bool = False
+
     # Mapping of feature types to normalization modes
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
