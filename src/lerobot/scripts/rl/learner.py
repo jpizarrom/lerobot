@@ -481,15 +481,15 @@ def add_actor_information_and_train(
             # optimizers["discrete_critic"].step()  # Step discrete critic optimizer if available
 
             # Discrete critic optimization (if available)
-            # if policy.config.num_discrete_actions is not None:
-            #     discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
-            #     loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-            #     optimizers["discrete_critic"].zero_grad()
-            #     loss_discrete_critic.backward()
-            #     discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-            #         parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value
-            #     )
-            #     optimizers["discrete_critic"].step()
+            if policy.config.num_discrete_actions is not None:
+                discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
+                loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
+                optimizers["discrete_critic"].zero_grad()
+                loss_discrete_critic.backward()
+                discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value
+                )
+                optimizers["discrete_critic"].step()
 
             # Update target networks (main and discrete)
             policy.update_target_networks()
@@ -573,23 +573,23 @@ def add_actor_information_and_train(
                 training_infos[f"critic_{k}"] = v.item()
 
         # Discrete critic optimization (if available)
-        # if policy.config.num_discrete_actions is not None:
-        #     discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
-        #     loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-        #     optimizers["discrete_critic"].zero_grad()
-        #     loss_discrete_critic.backward()
-        #     discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-        #         parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value
-        #     ).item()
-        #     optimizers["discrete_critic"].step()
+        if policy.config.num_discrete_actions is not None:
+            discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
+            loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
+            optimizers["discrete_critic"].zero_grad()
+            loss_discrete_critic.backward()
+            discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value
+            ).item()
+            optimizers["discrete_critic"].step()
 
-        #     # Add discrete critic info to training info
-        #     training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
-        #     training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
+            # Add discrete critic info to training info
+            training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
+            training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
 
-        #     if "info" in discrete_critic_output:
-        #         for k, v in discrete_critic_output["info"].items():
-        #             training_infos[f"discrete_critic_{k}"] = v.item()
+            if "info" in discrete_critic_output:
+                for k, v in discrete_critic_output["info"].items():
+                    training_infos[f"discrete_critic_{k}"] = v.item()
 
         # Actor and temperature optimization (at specified frequency)
         if optimization_step % policy_update_freq == 0:
@@ -613,22 +613,22 @@ def add_actor_information_and_train(
                         training_infos[f"actor_bc_flow_{k}"] = v.item()
 
                 # Actor optimization
-                # discrete_actor_output = policy.forward(forward_batch, model="discrete_actor")
-                # loss_discrete_actor = discrete_actor_output["loss_discrete_actor"]
-                # optimizers["discrete_actor"].zero_grad()
-                # loss_discrete_actor.backward()
-                # discrete_actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                #     parameters=policy.discrete_actor.parameters(), max_norm=clip_grad_norm_value
-                # ).item()
-                # optimizers["discrete_actor"].step()
+                discrete_actor_output = policy.forward(forward_batch, model="discrete_actor")
+                loss_discrete_actor = discrete_actor_output["loss_discrete_actor"]
+                optimizers["discrete_actor"].zero_grad()
+                loss_discrete_actor.backward()
+                discrete_actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=policy.discrete_actor.parameters(), max_norm=clip_grad_norm_value
+                ).item()
+                optimizers["discrete_actor"].step()
 
-                # # Add actor info to training info
-                # training_infos["loss_discrete_actor"] = loss_discrete_actor.item()
-                # training_infos["discrete_actor_grad_norm"] = discrete_actor_grad_norm
+                # Add actor info to training info
+                training_infos["loss_discrete_actor"] = loss_discrete_actor.item()
+                training_infos["discrete_actor_grad_norm"] = discrete_actor_grad_norm
 
-                # if "info" in discrete_actor_output:
-                #     for k, v in discrete_actor_output["info"].items():
-                #         training_infos[f"discrete_actor_{k}"] = v.item()
+                if "info" in discrete_actor_output:
+                    for k, v in discrete_actor_output["info"].items():
+                        training_infos[f"discrete_actor_{k}"] = v.item()
 
                 # Actor onestep flow optimization
                 actor_onestep_flow_output = policy.forward(forward_batch, model="actor_onestep_flow")
@@ -649,22 +649,22 @@ def add_actor_information_and_train(
                         training_infos[f"actor_onestep_flow_{k}"] = v.item()
 
                 # Temperature optimization
-                # temperature_output = policy.forward(forward_batch, model="temperature")
-                # loss_temperature = temperature_output["loss_temperature"]
-                # optimizers["temperature"].zero_grad()
-                # loss_temperature.backward()
-                # temp_grad_norm = torch.nn.utils.clip_grad_norm_(
-                #     parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
-                # ).item()
-                # optimizers["temperature"].step()
+                temperature_output = policy.forward(forward_batch, model="temperature")
+                loss_temperature = temperature_output["loss_temperature"]
+                optimizers["temperature"].zero_grad()
+                loss_temperature.backward()
+                temp_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    parameters=[policy.log_alpha], max_norm=clip_grad_norm_value
+                ).item()
+                optimizers["temperature"].step()
 
-                # # Add temperature info to training info
-                # training_infos["loss_temperature"] = loss_temperature.item()
-                # training_infos["temperature_grad_norm"] = temp_grad_norm
-                # training_infos["temperature"] = policy.temperature
+                # Add temperature info to training info
+                training_infos["loss_temperature"] = loss_temperature.item()
+                training_infos["temperature_grad_norm"] = temp_grad_norm
+                training_infos["temperature"] = policy.temperature
 
-                # # Update temperature
-                # policy.update_temperature()
+                # Update temperature
+                policy.update_temperature()
 
         # Push policy to actors if needed
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
@@ -929,18 +929,18 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
     )
     optimizer_critic = torch.optim.Adam(params=policy.critic_ensemble.parameters(), lr=cfg.policy.critic_lr)
 
-    # if cfg.policy.num_discrete_actions is not None:
-    #     optimizer_discrete_critic = torch.optim.Adam(
-    #         params=policy.discrete_critic.parameters(), lr=cfg.policy.critic_lr
-    #     )
-    #     optimizer_discrete_actor = torch.optim.Adam(
-    #         params=[
-    #             p
-    #             for n, p in policy.discrete_actor.named_parameters()
-    #             if not policy.config.shared_encoder or not n.startswith("encoder")
-    #         ],
-    #         lr=cfg.policy.actor_lr,
-    #     )
+    if cfg.policy.num_discrete_actions is not None:
+        optimizer_discrete_critic = torch.optim.Adam(
+            params=policy.discrete_critic.parameters(), lr=cfg.policy.critic_lr
+        )
+        optimizer_discrete_actor = torch.optim.Adam(
+            params=[
+                p
+                for n, p in policy.discrete_actor.named_parameters()
+                if not policy.config.shared_encoder or not n.startswith("encoder")
+            ],
+            lr=cfg.policy.actor_lr,
+        )
     optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
     lr_scheduler = None
     optimizers = {
@@ -949,9 +949,9 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         "critic": optimizer_critic,
         "temperature": optimizer_temperature,
     }
-    # if cfg.policy.num_discrete_actions is not None:
-    #     optimizers["discrete_critic"] = optimizer_discrete_critic
-    #     optimizers["discrete_actor"] = optimizer_discrete_actor
+    if cfg.policy.num_discrete_actions is not None:
+        optimizers["discrete_critic"] = optimizer_discrete_critic
+        optimizers["discrete_actor"] = optimizer_discrete_actor
     return optimizers, lr_scheduler
 
 
