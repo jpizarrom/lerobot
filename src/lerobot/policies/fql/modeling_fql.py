@@ -907,7 +907,7 @@ class FQLPolicy(
         # Start with masked tokens for one-step prediction
         discrete_tokens = MASK_TOKEN * torch.ones((batch_size, chunk_size), dtype=torch.long, device=device)
 
-        # Predict action distribution using one-step flow (no time input)
+        # Predict action distribution using one-step flow (no time input for one-step)
         predicted_logits, predicted_log_probs, predicted_action_probs = self.discrete_actor(
             observations, observation_features, discrete_tokens
         )
@@ -915,9 +915,14 @@ class FQLPolicy(
         # predicted_log_probs: [batch_size, chunk_size, num_discrete_actions]
         # predicted_action_probs: [batch_size, chunk_size, num_discrete_actions]
 
-        # Distillation loss: match one-step policy to BC flow target distribution
-        # Use MSE between action probabilities for stability
-        distill_loss = F.mse_loss(predicted_action_probs, target_action_probs)
+        # Distillation loss: soft-target cross-entropy (preferred over MSE on probs)
+        # KL(target || pred) up to a constant = CE(target, pred). Stop-grad on target.
+        soft_ce = -(target_action_probs.detach() * predicted_log_probs).sum(dim=-1)  # [batch_size, chunk_size]
+        if actions_is_pad is not None:
+            valid_mask = (~actions_is_pad).float()  # [batch_size, chunk_size]
+            distill_loss = (soft_ce * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
+        else:
+            distill_loss = soft_ce.mean()
 
         # Q loss: maximize expected Q under the predicted discrete action distribution
         # Use straight-through Gumbel-Softmax for differentiable sampling
@@ -1777,7 +1782,6 @@ class ActorVectorFieldPolicy(nn.Module):
 #             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
 #         else:
 #             orthogonal_init()(self.output_layer.weight)
-#             # nn.init.zeros_(self.output_layer.bias)
 
 #     def forward(
 #         self,
