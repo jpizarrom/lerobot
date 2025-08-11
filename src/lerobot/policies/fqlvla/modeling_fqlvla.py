@@ -444,67 +444,147 @@ class FQLVLAPolicy(
         critics_loss = td_loss_per_critic.sum()
 
         calql_loss = torch.tensor(0.0, device=q_preds.device)
-        if getattr(self.config, "calql", None) and self.config.calql.enabled:
-            # Sample negative actions per state in normalized space [-1,1]
+        if self.config.calql.enabled:
+            # Configs with safe defaults
             num_samples = self.config.calql.num_samples
             temperature = self.config.calql.temperature
             sample_source = self.config.calql.sample_source
+            critic_agg = self.config.calql.critic_agg
+            include_dataset_in_lse = self.config.calql.include_dataset_in_lse
+            normalize_by_k = self.config.calql.normalize_by_k
+            clip_diff_min = self.config.calql.clip_diff_min
+            clip_diff_max = self.config.calql.clip_diff_max
 
             with torch.no_grad():
                 B = observations["observation.state"].shape[0]
-                # sample in flattened space matching flat_actions shape
+                device = flat_actions.device
                 flat_dim = flat_actions.shape[1]
-                if sample_source == "uniform":
-                    sampled_flat = torch.empty(B, num_samples, flat_dim, device=flat_actions.device).uniform_(-1, 1)
-                elif sample_source == "gaussian":
-                    # Gaussian around zero in normalized space, clipped to [-1,1]
-                    sampled_flat = torch.randn(B, num_samples, flat_dim, device=flat_actions.device) * 0.5
-                    sampled_flat = sampled_flat.clamp(-1, 1)
-                else:  # policy_noise
-                    eps = torch.randn(B, num_samples, flat_dim, device=flat_actions.device) * 0.2
-                    base = flat_actions.unsqueeze(1).expand(-1, num_samples, -1)
-                    sampled_flat = (base + eps).clamp(-1, 1)
+                action_dim = self.actor_onestep_flow.action_dim
 
-            # Evaluate Q for sampled actions
-            # We need to tile observations for num_samples
-            obs_tiled = {k: v.unsqueeze(1).expand(-1, num_samples, *v.shape[1:]).reshape(-1, *v.shape[1:])
-                         for k, v in observations.items()}
-            sampled_flat_2d = sampled_flat.reshape(B * num_samples, flat_dim)
+                # Build sampled action sets following CO-RFT: random + policy(current) + policy(next)
+                # Modes:
+                # - "uniform" | "gaussian" | "policy_noise": single-source sampling (backward-compatible)
+                # - "policy_mixed": concatenates [uniform, current_policy, next_policy], each with num_samples
+                sampled_groups = []  # list of [B, N_g, flat_dim]
+                group_names = []
+
+                if sample_source in ("uniform", "gaussian", "policy_noise"):
+                    if sample_source == "uniform":
+                        sampled_flat = torch.empty(B, num_samples, flat_dim, device=device).uniform_(-1, 1)
+                    elif sample_source == "gaussian":
+                        sampled_flat = torch.randn(B, num_samples, flat_dim, device=device) * 0.5
+                        sampled_flat = sampled_flat.clamp(-1, 1)
+                    else:  # policy_noise around dataset action
+                        eps = torch.randn(B, num_samples, flat_dim, device=device) * 0.2
+                        base = flat_actions.unsqueeze(1).expand(-1, num_samples, -1)
+                        sampled_flat = (base + eps).clamp(-1, 1)
+                    sampled_groups.append(sampled_flat)
+                    group_names.append(sample_source)
+
+                elif sample_source == "policy_mixed":
+                    # 1) random uniform
+                    rand_uniform = torch.empty(B, num_samples, flat_dim, device=device).uniform_(-1, 1)
+                    sampled_groups.append(rand_uniform)
+                    group_names.append("random")
+
+                    # 2) current-policy actions (repeat per state)
+                    noises_curr = torch.randn(B * num_samples, action_dim, device=device)
+                    obs_tiled_curr = {
+                        k: v.unsqueeze(1).expand(-1, num_samples, *v.shape[1:]).reshape(-1, *v.shape[1:])
+                        for k, v in observations.items()
+                    }
+                    curr_actions, _, _ = self.actor_onestep_flow(obs_tiled_curr, None, noises_curr)
+                    curr_actions = curr_actions.clamp(-1.0, 1.0)
+                    curr_actions = curr_actions.view(B, num_samples, -1)
+                    sampled_groups.append(curr_actions)
+                    group_names.append("current")
+
+                    # 3) next-policy actions (repeat per state)
+                    noises_next = torch.randn(B * num_samples, action_dim, device=device)
+                    obs_tiled_next = {
+                        k: v.unsqueeze(1).expand(-1, num_samples, *v.shape[1:]).reshape(-1, *v.shape[1:])
+                        for k, v in next_observations.items()
+                    }
+                    next_actions_pi, _, _ = self.actor_onestep_flow(obs_tiled_next, None, noises_next)
+                    next_actions_pi = next_actions_pi.clamp(-1.0, 1.0)
+                    next_actions_pi = next_actions_pi.view(B, num_samples, -1)
+                    sampled_groups.append(next_actions_pi)
+                    group_names.append("next")
+
+                else:
+                    # Fallback to uniform if unknown mode
+                    sampled_flat = torch.empty(B, num_samples, flat_dim, device=device).uniform_(-1, 1)
+                    sampled_groups.append(sampled_flat)
+                    group_names.append("uniform")
+
+            # Evaluate Q for sampled actions on current observations
+            all_sampled = torch.cat(sampled_groups, dim=1)  # [B, N_total, flat_dim]
+            N_total = all_sampled.shape[1]
+            obs_tiled_all = {
+                k: v.unsqueeze(1).expand(-1, N_total, *v.shape[1:]).reshape(-1, *v.shape[1:])
+                for k, v in observations.items()
+            }
+            all_sampled_2d = all_sampled.reshape(B * N_total, flat_dim)
+
             sampled_qs = self.critic_forward(
-                observations=obs_tiled,
-                actions=sampled_flat_2d,
+                observations=obs_tiled_all,
+                actions=all_sampled_2d,
                 use_target=False,
-                observation_features=None if observation_features is None else None,
+                observation_features=None,
                 do_output_normalization=False,
-            )  # [E, B*N]
+            )  # [E, B*N_total]
 
-            # Aggregate over critics
-            if self.config.calql.critic_agg == "min":
+            if critic_agg == "min":
                 sampled_qs_agg = sampled_qs.min(dim=0)[0]
             else:
                 sampled_qs_agg = sampled_qs.mean(dim=0)
+            sampled_qs_agg = sampled_qs_agg.view(B, N_total)  # [B, N_total]
 
-            # Reshape to [B, N]
-            sampled_qs_agg = sampled_qs_agg.view(B, num_samples)
+            # Compute Q_data for dataset action (ensemble-mean)
+            # q_data = self.critic_forward(
+            #     observations=observations,
+            #     actions=flat_actions,
+            #     use_target=False,
+            #     observation_features=observation_features,
+            #     do_output_normalization=False,
+            # ).mean(dim=0)  # [B]
+            q_data = q_preds.mean(dim=0)  # [B]
 
-            # CalQL objective: temperature * logsumexp(Q/temperature) - Q_data
-            # Compute Q_data as ensemble-mean on dataset action
-            q_data = self.critic_forward(
-                observations=observations,
-                actions=flat_actions,
-                use_target=False,
-                observation_features=observation_features,
-                do_output_normalization=False,
-            ).mean(dim=0)  # [B]
+            # Optionally include dataset action inside the log-sum-exp set
+            if include_dataset_in_lse:
+                lse_vals = torch.cat([sampled_qs_agg, q_data.unsqueeze(1)], dim=1)  # [B, N_total+1]
+            else:
+                lse_vals = sampled_qs_agg  # [B, N_total]
 
-            # Only compute on valid entries (mask by actions_is_pad last flag)
-            q_data = q_data[valid_mask]
-            sampled_qs_valid = sampled_qs_agg[valid_mask]
+            # Compute temperature-scaled, K-normalized log-sum-exp
+            eps = 1e-6
+            K = lse_vals.shape[1]
+            lse_raw = torch.logsumexp(lse_vals / max(eps, temperature), dim=1)  # [B]
+            if normalize_by_k and K > 0:
+                lse_raw = lse_raw - math.log(K)
+            lse = temperature * lse_raw  # [B]
 
-            lse = temperature * torch.logsumexp(sampled_qs_valid / max(1e-6, temperature), dim=1)
-            calql_loss = (lse - q_data).mean()
+            # CalQL difference and optional clipping
+            calql_diff = lse - q_data  # [B]
+            if (clip_diff_min != float("-inf")) or (clip_diff_max != float("inf")):
+                calql_diff = calql_diff.clamp(min=clip_diff_min, max=clip_diff_max)
 
+            # Mask invalid entries (padding)
+            calql_loss = calql_diff[valid_mask].mean()
             critics_loss = critics_loss + self.config.calql.weight * calql_loss
+
+            # Group-wise diagnostics
+            with torch.no_grad():
+                offsets = [0]
+                for g in sampled_groups:
+                    offsets.append(offsets[-1] + g.shape[1])
+                group_means = {}
+                for i, name in enumerate(group_names):
+                    s, e = offsets[i], offsets[i + 1]
+                    group_means[f"calql_{name}_action_values"] = (
+                        sampled_qs_agg[:, s:e][valid_mask].mean()
+                    )
+                calql_ood_values = lse[valid_mask].mean()
 
         info = {
             "predicted_qs": torch.mean(q_preds),
@@ -512,9 +592,12 @@ class FQLVLAPolicy(
             "rewards": rewards.mean(),
             "actions_is_pad": torch.mean(actions_is_pad.float()),
         }
-        if getattr(self.config, "calql", None) and self.config.calql.enabled:
+        if self.config.calql.enabled:
             info.update({
                 "calql_loss": calql_loss.detach(),
+                "calql_diff": calql_loss.detach(),  # mean diff over valid
+                "calql_ood_values": calql_ood_values.detach(),
+                **group_means,
             })
 
         return critics_loss, info
@@ -1658,9 +1741,9 @@ class ActorVectorFieldPolicyVLA(nn.Module):
         # self.output_layer = nn.Linear(out_features, 32)
         # if init_final is not None:
         #     nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
-        #     nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
-        # else:
-        #     orthogonal_init()(self.output_layer.weight)
+       #     nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+# else:
+#     orthogonal_init()(self.output_layer.weight)
 
     def forward(
         self,

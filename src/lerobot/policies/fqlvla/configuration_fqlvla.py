@@ -104,8 +104,17 @@ class CalQLConfig:
     weight: float = 1.0
     num_samples: int = 10
     temperature: float = 1.0
-    sample_source: str = "uniform"  # ["uniform", "gaussian", "policy_noise"]
+    # Sampling source for CalQL candidates: single-source modes or a mixed policy mode
+    sample_source: str = "uniform"  # ["uniform", "gaussian", "policy_noise", "policy_mixed"]
+    # Aggregation over critic ensemble for sampled actions
     critic_agg: str = "min"  # ["min", "mean"]
+    # Whether to include the dataset action Q-value inside the log-sum-exp set
+    include_dataset_in_lse: bool = True
+    # Subtract log(K) after logsumexp for numerical calibration (as in CO-RFT reference)
+    normalize_by_k: bool = True
+    # Optional clipping on the CalQL diff (lse - q_data)
+    clip_diff_min: float = -float("inf")
+    clip_diff_max: float = float("inf")
 
 
 @PreTrainedConfig.register_subclass("fqlvla")
