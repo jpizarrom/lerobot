@@ -115,7 +115,7 @@ class FQLPolicy(
     def compute_discrete_flow_actions(
         self, batch: dict[str, Tensor], discrete_noises: Tensor = None
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Compute discrete actions using proper discrete flow matching sampling exactly following reference."""
+        """Compute discrete actions using masked discrete flow matching sampling exactly following reference."""
         observations_features = None
         if self.shared_encoder and self.discrete_actor_bc_flow.encoder.has_images:
             # Cache and normalize image features
@@ -126,58 +126,53 @@ class FQLPolicy(
         batch_size = batch["observation.state"].shape[0]
         chunk_size = self.config.chunk_size  # D in reference
         device = batch["observation.state"].device
-        S = self.config.num_discrete_actions  # S in reference
-        
-        # Sampling exactly following the reference pattern
+        MASK_TOKEN = self.config.num_discrete_actions  # MASK token at index num_discrete_actions
+
+        # Sampling exactly following the reference pattern with masking
         t = 0.0
-        dt = 1.0 / self.config.flow_steps  # or use 0.001 as in reference
-        noise = 1.0  # noise parameter from reference
-        
-        # Start from random tokens: xt = torch.randint(0, S, (num_samples, D))
-        xt = torch.randint(0, S, (batch_size, chunk_size), device=device)
-        
-        # Flow matching sampling loop exactly following reference
+        dt = 1.0 / self.config.flow_steps
+        noise = 10.0  # noise parameter from reference (higher for masking)
+
+        # Start from all masked tokens: xt = MASK_TOKEN * torch.ones((num_samples, D), dtype=torch.long)
+        xt = MASK_TOKEN * torch.ones((batch_size, chunk_size), dtype=torch.long, device=device)
+
+        # Flow matching sampling loop exactly following reference with masking
         while t < 1.0:
             # Get model predictions: logits = model(xt, t * torch.ones((num_samples,)))
             t_tensor = torch.full((batch_size,), t, device=device)
             t_expanded = t_tensor.unsqueeze(-1)  # [batch_size, 1] for network
-            
+
+            # Model outputs logits only over valid values (0 to num_discrete_actions-1), not including MASK token
             logits, _, _ = self.discrete_actor_bc_flow(
                 batch, observations_features, xt, t_expanded
-            )  # [batch_size, chunk_size, num_discrete_actions] -> (B, D, S)
-            
-            # Convert to probabilities: x1_probs = F.softmax(logits, dim=-1)
-            x1_probs = F.softmax(logits, dim=-1)  # (B, D, S)
-            
-            # Get probabilities at current state: x1_probs_at_xt = torch.gather(x1_probs, -1, xt[:, :, None])
-            x1_probs_at_xt = torch.gather(x1_probs, -1, xt.unsqueeze(-1))  # (B, D, 1)
-            
-            # Don't add noise on the final step
-            if t + dt < 1.0:
-                N = noise
-            else:
-                N = 0
-            
-            # Calculate the off-diagonal step probabilities exactly following reference
-            step_probs = (
-                dt * ((1 + N + N * (S - 1) * t) / (1 - t)) * x1_probs + 
-                dt * N * x1_probs_at_xt
-            ).clamp(max=1.0)  # (B, D, S)
-            
-            # Calculate the on-diagonal step probabilities exactly following reference
-            # 1) Zero out the diagonal entries
-            step_probs.scatter_(-1, xt.unsqueeze(-1), 0.0)
-            # 2) Calculate the diagonal entries such that the probability row sums to 1
-            diagonal_probs = (1.0 - step_probs.sum(dim=-1, keepdim=True)).clamp(min=0.0)
-            step_probs.scatter_(-1, xt.unsqueeze(-1), diagonal_probs)
-            
-            # Sample next state: xt = Categorical(step_probs).sample()
-            # Need to handle the sampling correctly for the (B, D, S) tensor
-            step_probs_flat = step_probs.view(-1, S)  # Flatten to (B*D, S)
-            xt_flat = Categorical(step_probs_flat).sample()  # Sample (B*D,)
-            xt = xt_flat.view(batch_size, chunk_size)  # Reshape back to (B, D)
-            
+            )  # [batch_size, chunk_size, num_discrete_actions] -> (B, D, num_discrete_actions)
+
+            # Convert to probabilities over valid actions: x1_probs = F.softmax(logits, dim=-1)
+            x1_probs = F.softmax(logits, dim=-1)  # (B, D, num_discrete_actions)
+
+            # Sample from valid actions: x1 = Categorical(x1_probs).sample()
+            x1 = Categorical(x1_probs).sample()  # (B, D) - values in range [0, num_discrete_actions-1]
+
+            # Determine which positions will unmask: will_unmask = torch.rand((B, D)) < (dt * (1 + noise * t) / (1-t))
+            will_unmask = torch.rand((batch_size, chunk_size), device=device) < (
+                dt * (1 + noise * t) / (1 - t)
+            )
+            # Only unmask positions that are currently masked
+            will_unmask = will_unmask & (xt == MASK_TOKEN)  # (B, D)
+
+            # Unmask selected positions with sampled values
+            xt[will_unmask] = x1[will_unmask]
+
             t += dt
+
+            # Add noise (re-mask) if not final step
+            if t < 1.0:
+                # Determine which unmasked positions will be re-masked: will_mask = torch.rand((B, D)) < dt * noise
+                will_mask = torch.rand((batch_size, chunk_size), device=device) < dt * noise
+                # Only mask positions that are currently unmasked
+                will_mask = will_mask & (xt != MASK_TOKEN)  # (B, D)
+                # Re-mask selected positions
+                xt[will_mask] = MASK_TOKEN
 
         # Final forward pass to get final probabilities
         t_final = torch.ones((batch_size,), device=device)
@@ -238,22 +233,21 @@ class FQLPolicy(
             actions = torch.clamp(actions, -1.0, 1.0)
             # actions = self.unnormalize_targets({"action": actions})["action"]
             if self.config.num_discrete_actions is not None:
-                # Use discrete one-step flow for discrete actions
+                # Use discrete flow matching for discrete actions with masking approach
                 chunk_size = self.config.chunk_size
-                
-                # Start with random tokens from the discrete action space
-                discrete_tokens = torch.randint(
-                    0, self.config.num_discrete_actions,
-                    (batch_shape, chunk_size), 
-                    dtype=torch.long, 
-                    device=device
+                MASK_TOKEN = self.config.num_discrete_actions  # MASK token at index num_discrete_actions
+
+                # Start with masked tokens for one-step prediction
+                discrete_tokens = MASK_TOKEN * torch.ones(
+                    (batch_shape, chunk_size), dtype=torch.long, device=device
                 )
-                
+
                 # One-step prediction using discrete actor (no time input for one-step)
+                # This outputs logits over valid actions (0 to num_discrete_actions-1), not including MASK
                 discrete_logits, _, _ = self.discrete_actor(batch, observations_features, discrete_tokens)
                 discrete_dist = Categorical(logits=discrete_logits.view(-1, self.config.num_discrete_actions))
                 discrete_actions = discrete_dist.sample().view(batch_shape, chunk_size)
-                
+
                 # Add as last dimension
                 discrete_actions = discrete_actions.unsqueeze(-1).float()
                 actions = torch.cat([actions, discrete_actions], dim=-1)
@@ -613,24 +607,23 @@ class FQLPolicy(
         )
 
         with torch.no_grad():
-            # Use discrete flow matching for next action sampling
+            # Use discrete flow matching for next action sampling with masking
             batch_size = next_observations["observation.state"].shape[0]
             device = next_observations["observation.state"].device
             chunk_size = self.config.chunk_size
+            MASK_TOKEN = self.config.num_discrete_actions  # MASK token at index num_discrete_actions
 
-            # Start with random tokens for discrete actor (one-step flow)
-            discrete_tokens = torch.randint(
-                0, self.config.num_discrete_actions,
-                (batch_size, chunk_size), 
-                dtype=torch.long, 
-                device=device
+            # Start with masked tokens for discrete actor (one-step flow)
+            discrete_tokens = MASK_TOKEN * torch.ones(
+                (batch_size, chunk_size), dtype=torch.long, device=device
             )
 
             # Get next action probabilities using discrete_actor (one-step flow)
+            # This outputs logits over valid actions (0 to num_discrete_actions-1), not including MASK
             _, next_log_probs, next_action_probs = self.discrete_actor(
                 next_observations, next_observation_features, discrete_tokens
             )
-            # next_actions [batch_size, chunk_size]
+            # next_actions [batch_size, chunk_size] - NOTE: not used directly
             # next_log_probs [batch_size, chunk_size, num_discrete_actions]
             # next_action_probs [batch_size, chunk_size, num_discrete_actions]
 
@@ -639,7 +632,7 @@ class FQLPolicy(
                 observations=next_observations,
                 actions=next_action_probs.reshape(
                     batch_size, self.config.chunk_size * self.config.num_discrete_actions
-                ),  # Flatten to match critic input shape
+                ),  # Flatten to match critic input shape for valid actions only
                 use_target=True,
                 observation_features=next_observation_features,
             )  # (num_critics, batch_size)
@@ -662,10 +655,11 @@ class FQLPolicy(
             td_target = rewards.squeeze(-1) + (1 - done) * discounts.squeeze(-1) * next_q_min
 
         # Compute current Q-values for discrete actions
-        # Convert discrete actions to one-hot for critic input
+        # Convert discrete actions to one-hot for critic input (only for valid actions 0 to num_discrete_actions-1)
         actions_discrete_flat = actions_discrete.view(batch_size, -1)  # (batch_size, chunk_size)
         actions_one_hot = F.one_hot(
-            actions_discrete_flat, num_classes=self.config.num_discrete_actions
+            actions_discrete_flat,
+            num_classes=self.config.num_discrete_actions,  # Valid actions only
         ).float()
         actions_one_hot = actions_one_hot.view(
             batch_size, -1
@@ -810,50 +804,55 @@ class FQLPolicy(
         actions: Tensor | None,
         actions_is_pad: Tensor | None,
     ) -> Tensor:
-        """Compute discrete behavioral cloning flow matching loss exactly following the reference pattern."""
+        """Compute discrete behavioral cloning flow matching loss with masking exactly following the reference pattern."""
         # Extract discrete actions from the action tensor
         actions_discrete: Tensor = actions[:, :, DISCRETE_DIMENSION_INDEX:].clone()
 
-        # Ensure discrete actions are integers and in valid range
+        # Ensure discrete actions are integers and in valid range (0 to num_discrete_actions-1, where num_discrete_actions is MASK)
         actions_discrete = torch.clamp(actions_discrete, 0, self.config.num_discrete_actions - 1)
         x1 = torch.round(actions_discrete).long().squeeze(-1)  # [batch_size, chunk_size] - this is our target
 
         batch_size = x1.shape[0]
         chunk_size = x1.shape[1]  # D in reference
         device = observations["observation.state"].device
-        S = self.config.num_discrete_actions  # S in reference
-        
+        S = self.config.num_discrete_actions + 1  # S in reference (valid actions + MASK token)
+        MASK_TOKEN = self.config.num_discrete_actions  # MASK token at index num_discrete_actions
+
         # Sample random time steps - following reference: t = torch.rand((B,))
         t = torch.rand(batch_size, device=device)  # [batch_size]
-        
-        # Create corrupted sequence exactly following the reference pattern
+
+        # Create corrupted sequence exactly following the reference masking pattern
         xt = x1.clone()  # Start with target actions
-        
-        # Create uniform noise: uniform_noise = torch.randint(0, S, (B, D))
-        uniform_noise = torch.randint(0, S, (batch_size, chunk_size), device=device)
-        
+
         # Create corruption mask: corrupt_mask = torch.rand((B, D)) < (1 - t[:, None])
         corrupt_mask = torch.rand((batch_size, chunk_size), device=device) < (1 - t[:, None])
-        
-        # Apply corruption: xt[corrupt_mask] = uniform_noise[corrupt_mask]
-        xt[corrupt_mask] = uniform_noise[corrupt_mask]
-        
+
+        # Apply corruption with MASK tokens: xt[corrupt_mask] = MASK_TOKEN
+        xt[corrupt_mask] = MASK_TOKEN
+
         # Predict logits using discrete BC flow actor
         # Pass time with correct shape for the network
         t_expanded = t.unsqueeze(-1)  # [batch_size, 1] for network compatibility
         logits, _, _ = self.discrete_actor_bc_flow(
             observations, observation_features, xt, t_expanded
-        )  # [batch_size, chunk_size, num_discrete_actions] -> (B, D, S)
-        
+        )  # [batch_size, chunk_size, num_discrete_actions] -> (B, D, num_discrete_actions)
+
+        # Prepare target for loss computation - following reference pattern
+        x1_loss_target = x1.clone()
+        # Don't compute loss on dimensions that are already revealed (not corrupted)
+        x1_loss_target[xt != MASK_TOKEN] = -1  # Set to ignore_index for non-masked positions
+
         # Compute cross-entropy loss exactly following reference pattern
-        # loss = F.cross_entropy(logits.transpose(1,2), x1, reduction='mean', ignore_index=-1)
+        # loss = F.cross_entropy(logits.transpose(1,2), x1_loss_target, reduction='mean', ignore_index=-1)
         bc_flow_loss = F.cross_entropy(
-            logits.transpose(1, 2),  # [batch_size, num_discrete_actions, chunk_size] -> (B, S, D)
-            x1,  # [batch_size, chunk_size] -> (B, D)
-            reduction='none',  # We'll handle reduction manually for padding
-            ignore_index=-1
+            logits.transpose(
+                1, 2
+            ),  # [batch_size, num_discrete_actions, chunk_size] -> (B, num_discrete_actions, D)
+            x1_loss_target,  # [batch_size, chunk_size] -> (B, D)
+            reduction="none",  # We'll handle reduction manually for padding
+            ignore_index=-1,
         )  # -> (B, D)
-        
+
         # Apply action padding mask if provided
         if actions_is_pad is not None:
             # Apply mask to valid timesteps
@@ -867,6 +866,7 @@ class FQLPolicy(
 
         info = {
             "corruption_rate": (1 - t).mean(),
+            "mask_rate": (xt == MASK_TOKEN).float().mean(),
             "accuracy": (logits.argmax(dim=-1) == x1).float().mean(),
         }
 
@@ -878,26 +878,22 @@ class FQLPolicy(
         observation_features: Tensor | None,
         actions_is_pad: Tensor | None,
     ) -> Tensor:
-        """Compute discrete one-step flow loss with distillation and Q-learning."""
+        """Compute discrete one-step flow loss with distillation and Q-learning using masking approach."""
         batch_size = observations["observation.state"].shape[0]
         chunk_size = self.config.chunk_size
         device = observations["observation.state"].device
+        MASK_TOKEN = self.config.num_discrete_actions  # MASK token at index num_discrete_actions
 
         # Get target action distribution from BC flow (distillation target)
         target_actions, target_log_probs, target_action_probs = self.compute_discrete_flow_actions(
             observations
         )
-        # target_actions: [batch_size, chunk_size]
+        # target_actions: [batch_size, chunk_size] - values in range [0, num_discrete_actions-1]
         # target_log_probs: [batch_size, chunk_size, num_discrete_actions]
         # target_action_probs: [batch_size, chunk_size, num_discrete_actions]
 
-        # Start with random tokens for one-step prediction
-        discrete_tokens = torch.randint(
-            0, self.config.num_discrete_actions,
-            (batch_size, chunk_size), 
-            dtype=torch.long, 
-            device=device
-        )
+        # Start with masked tokens for one-step prediction
+        discrete_tokens = MASK_TOKEN * torch.ones((batch_size, chunk_size), dtype=torch.long, device=device)
 
         # Predict action distribution using one-step flow (no time input)
         predicted_logits, predicted_log_probs, predicted_action_probs = self.discrete_actor(
@@ -1022,7 +1018,7 @@ class FQLPolicy(
         heads = [
             DiscreteCriticHead(
                 input_dim=self.encoder_discrete_critic.output_dim
-                + self.config.num_discrete_actions * self.config.chunk_size,
+                + self.config.num_discrete_actions * self.config.chunk_size,  # Valid actions only
                 **asdict(self.config.discrete_critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -1031,7 +1027,7 @@ class FQLPolicy(
         target_heads = [
             DiscreteCriticHead(
                 input_dim=self.encoder_discrete_critic.output_dim
-                + self.config.num_discrete_actions * self.config.chunk_size,
+                + self.config.num_discrete_actions * self.config.chunk_size,  # Valid actions only
                 **asdict(self.config.discrete_critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -1095,15 +1091,17 @@ class FQLPolicy(
         """Initialize discrete BC flow matching actor."""
         embedding_dim = 16  # Default embedding dimension following reference
         # Calculate input dimension for the base network
-        base_input_dim = self.encoder_discrete_actor_bc_flow.output_dim
-        
+        # base_input_dim = self.encoder_discrete_actor_bc_flow.output_dim
+
         self.discrete_actor_bc_flow = DiscreteActorVectorFieldPolicy(
             encoder=self.encoder_discrete_actor_bc_flow,
             network=MLP(
-                input_dim=base_input_dim,
+                input_dim=self.encoder_discrete_actor_bc_flow.output_dim
+                + (embedding_dim) * self.config.chunk_size
+                + 1,
                 **asdict(self.config.discrete_actor_network_kwargs),
             ),
-            action_dim=self.config.num_discrete_actions * self.config.chunk_size,
+            action_dim=self.config.num_discrete_actions * self.config.chunk_size,  # Valid actions only
             num_discrete_actions=self.config.num_discrete_actions,
             encoder_is_shared=self.shared_encoder,
             embedding_dim=embedding_dim,
@@ -1114,15 +1112,16 @@ class FQLPolicy(
         """Initialize discrete one-step flow matching actor."""
         embedding_dim = 16  # Default embedding dimension following reference
         # Calculate input dimension for the base network
-        base_input_dim = self.encoder_discrete_actor_onestep_flow.output_dim
-        
+        # base_input_dim = self.encoder_discrete_actor_onestep_flow.output_dim
+
         self.discrete_actor = DiscreteActorVectorFieldPolicy(
             encoder=self.encoder_discrete_actor_onestep_flow,
             network=MLP(
-                input_dim=base_input_dim,
+                input_dim=self.encoder_discrete_actor_bc_flow.output_dim
+                + (embedding_dim) * self.config.chunk_size,
                 **asdict(self.config.discrete_actor_network_kwargs),
             ),
-            action_dim=self.config.num_discrete_actions * self.config.chunk_size,
+            action_dim=self.config.num_discrete_actions * self.config.chunk_size,  # Valid actions only
             num_discrete_actions=self.config.num_discrete_actions,
             encoder_is_shared=self.shared_encoder,
             embedding_dim=embedding_dim,
@@ -1885,22 +1884,24 @@ class DiscreteActorVectorFieldPolicy(nn.Module):
                 out_features = layer.out_features
                 break
 
+        self.output_layer = nn.Linear(out_features, self.chunk_size * num_discrete_actions)
+
         # Additional network layers following the reference pattern
         # Input: observation encoding + flattened token embeddings with time
         # Output: logits for each position and discrete action (S*D pattern)
-        self.flow_net = nn.Sequential(
-            nn.Linear(out_features + self.chunk_size * (self.embedding_dim + int(use_time)), 128),
-            nn.ReLU(),
-            nn.Linear(128, 128), 
-            nn.ReLU(),
-            nn.Linear(128, self.chunk_size * num_discrete_actions)
-        )
-        
+        # self.flow_net = nn.Sequential(
+        #     nn.Linear(out_features + self.chunk_size * (self.embedding_dim + int(use_time)), 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, self.chunk_size * num_discrete_actions)
+        # )
+
         if init_final is not None:
-            nn.init.uniform_(self.flow_net[-1].weight, -init_final, init_final)
-            nn.init.uniform_(self.flow_net[-1].bias, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
-            orthogonal_init()(self.flow_net[-1].weight)
+            orthogonal_init()(self.output_layer.weight)
 
     def forward(
         self,
@@ -1925,37 +1926,47 @@ class DiscreteActorVectorFieldPolicy(nn.Module):
             action_probs: Action probabilities [batch_size, chunk_size, num_discrete_actions]
         """
         batch_size = discrete_tokens.shape[0]
-        
+
         # Get observation encoding
         obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
 
-        # Process through base network first
-        x = self.network(obs_enc)
-        
+        # # Process through base network first
+        # x = self.network(obs_enc)
+
         # Embed discrete tokens - following reference pattern (B, D, 16)
         token_emb = self.token_embedding(discrete_tokens)  # [batch_size, chunk_size, embedding_dim]
-        
-        # Add time embedding if provided - following reference pattern
+
+        inputs = [
+            obs_enc,
+            token_emb.flatten(1, 2),
+        ]  # Flatten token embeddings to [batch_size, chunk_size * embedding_dim]
         if times is not None:
-            # Expand time to match token dimensions: t[:, None, None].repeat(1, D, 1)
-            time_emb = times.unsqueeze(1).repeat(1, self.chunk_size, 1)  # [batch_size, chunk_size, 1]
-            # Concatenate time with token embeddings
-            net_input = torch.cat([token_emb, time_emb], dim=-1)  # [batch_size, chunk_size, embedding_dim + 1]
-        else:
-            net_input = token_emb
-        
+            inputs.append(times)
+
+        x = torch.cat(inputs, dim=-1)
+
+        # Add time embedding if provided - following reference pattern
+        # if times is not None:
+        #     # Expand time to match token dimensions: t[:, None, None].repeat(1, D, 1)
+        #     time_emb = times.unsqueeze(1).repeat(1, self.chunk_size, 1)  # [batch_size, chunk_size, 1]
+        #     # Concatenate time with token embeddings
+        #     net_input = torch.cat([token_emb, time_emb], dim=-1)  # [batch_size, chunk_size, embedding_dim + 1]
+        # else:
+        #     net_input = token_emb
+
         # Flatten for network input following reference: (B, D * 17)
-        net_input_flat = net_input.reshape(batch_size, -1)
-        
+        # net_input_flat = net_input.reshape(batch_size, -1)
+
         # Combine with observation features
-        combined_input = torch.cat([x, net_input_flat], dim=-1)
-        
+        # combined_input = torch.cat([x, net_input_flat], dim=-1)
+
         # Pass through flow network
-        logits_flat = self.flow_net(combined_input)
-        
+        # logits_flat = self.flow_net(combined_input)
+        logits_flat = self.output_layer(self.network(x))
+
         # Reshape to (B, D, S) following reference pattern
         logits = logits_flat.view(batch_size, self.chunk_size, self.num_discrete_actions)
-        
+
         # Compute probabilities
         action_probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
