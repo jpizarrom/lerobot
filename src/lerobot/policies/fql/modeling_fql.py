@@ -920,18 +920,21 @@ class FQLPolicy(
         distill_loss = F.mse_loss(predicted_action_probs, target_action_probs)
 
         # Q loss: maximize expected Q under the predicted discrete action distribution
-        # Sample actions from the predicted distribution for consistent input to discrete critic
-        predicted_actions_sampled = Categorical(probs=predicted_action_probs).sample()  # [batch_size, chunk_size]
-        
-        # Convert to one-hot encoding for discrete critic input
-        predicted_actions_one_hot = F.one_hot(
-            predicted_actions_sampled,
-            num_classes=self.config.num_discrete_actions,
-        ).float()  # [batch_size, chunk_size, num_discrete_actions]
-        
+        # Use straight-through Gumbel-Softmax for differentiable sampling
+        tau = getattr(self.config, "gumbel_tau", 1.0)
+        predicted_actions_one_hot = F.gumbel_softmax(
+            predicted_logits, tau=tau, hard=True, dim=-1
+        )  # [batch_size, chunk_size, num_discrete_actions]
+
+        # Zero-out padded timesteps before flattening
+        if actions_is_pad is not None:
+            predicted_actions_one_hot = predicted_actions_one_hot * (~actions_is_pad).unsqueeze(-1).float()
+
         # Flatten for critic input to match expected format
-        actions_flat = predicted_actions_one_hot.view(batch_size, -1)  # [batch_size, chunk_size * num_discrete_actions]
-        
+        actions_flat = predicted_actions_one_hot.view(
+            batch_size, -1
+        )  # [batch_size, chunk_size * num_discrete_actions]
+
         q_preds = self.discrete_critic_forward(
             observations=observations,
             actions=actions_flat,
