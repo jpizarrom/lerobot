@@ -620,19 +620,30 @@ class FQLPolicy(
 
             # Get next action probabilities using discrete_actor (one-step flow)
             # This outputs logits over valid actions (0 to num_discrete_actions-1), not including MASK
-            _, next_log_probs, next_action_probs = self.discrete_actor(
+            next_action_logits, next_log_probs, next_action_probs = self.discrete_actor(
                 next_observations, next_observation_features, discrete_tokens
             )
-            # next_actions [batch_size, chunk_size] - NOTE: not used directly
+            # next_action_logits [batch_size, chunk_size, num_discrete_actions]
             # next_log_probs [batch_size, chunk_size, num_discrete_actions]
             # next_action_probs [batch_size, chunk_size, num_discrete_actions]
 
-            # Compute next Q-values
+            # Sample actions from the distribution for next state Q-value computation
+            next_actions_sampled = Categorical(probs=next_action_probs).sample()  # [batch_size, chunk_size]
+            
+            # Convert to one-hot encoding for discrete critic input
+            next_actions_one_hot = F.one_hot(
+                next_actions_sampled,
+                num_classes=self.config.num_discrete_actions,
+            ).float()  # [batch_size, chunk_size, num_discrete_actions]
+            
+            next_actions_flat = next_actions_one_hot.view(
+                batch_size, -1
+            )  # [batch_size, chunk_size * num_discrete_actions]
+
+            # Compute next Q-values using sampled actions
             next_q_values = self.discrete_critic_forward(
                 observations=next_observations,
-                actions=next_action_probs.reshape(
-                    batch_size, self.config.chunk_size * self.config.num_discrete_actions
-                ),  # Flatten to match critic input shape for valid actions only
+                actions=next_actions_flat,
                 use_target=True,
                 observation_features=next_observation_features,
             )  # (num_critics, batch_size)
@@ -656,6 +667,7 @@ class FQLPolicy(
 
         # Compute current Q-values for discrete actions
         # Convert discrete actions to one-hot for critic input (only for valid actions 0 to num_discrete_actions-1)
+        # This maintains consistency with the probabilistic representation used for next actions
         actions_discrete_flat = actions_discrete.view(batch_size, -1)  # (batch_size, chunk_size)
         actions_one_hot = F.one_hot(
             actions_discrete_flat,
@@ -665,7 +677,7 @@ class FQLPolicy(
             batch_size, -1
         )  # (batch_size, chunk_size * num_discrete_actions)
 
-        # Get current Q-values
+        # Get current Q-values using the one-hot encoded actual actions
         q_preds = self.discrete_critic_forward(
             observations=observations,
             actions=actions_one_hot,
@@ -908,8 +920,18 @@ class FQLPolicy(
         distill_loss = F.mse_loss(predicted_action_probs, target_action_probs)
 
         # Q loss: maximize expected Q under the predicted discrete action distribution
-        # Flatten per-chunk probabilities for the discrete critic input
-        actions_flat = predicted_action_probs.reshape(batch_size, -1)
+        # Sample actions from the predicted distribution for consistent input to discrete critic
+        predicted_actions_sampled = Categorical(probs=predicted_action_probs).sample()  # [batch_size, chunk_size]
+        
+        # Convert to one-hot encoding for discrete critic input
+        predicted_actions_one_hot = F.one_hot(
+            predicted_actions_sampled,
+            num_classes=self.config.num_discrete_actions,
+        ).float()  # [batch_size, chunk_size, num_discrete_actions]
+        
+        # Flatten for critic input to match expected format
+        actions_flat = predicted_actions_one_hot.view(batch_size, -1)  # [batch_size, chunk_size * num_discrete_actions]
+        
         q_preds = self.discrete_critic_forward(
             observations=observations,
             actions=actions_flat,
@@ -920,7 +942,7 @@ class FQLPolicy(
         min_q_preds = q_preds.mean(dim=0, keepdim=True)
         q_loss = -min_q_preds.mean()
 
-        if getattr(self.config, "normalize_q_loss", False):
+        if self.config.normalize_q_loss:
             lam = 1.0 / q_preds.abs().mean().detach()
             q_loss = lam * q_loss
 
