@@ -35,18 +35,21 @@ from torch.distributions import (
     TransformedDistribution,
 )
 from transformers import (
+    AutoConfig,
     AutoModel,
-    AutoModelForImageTextToText,
-    SmolVLMForConditionalGeneration,
+    # SmolVLMForConditionalGeneration,
 )
 
-from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.policies.fqlvla.configuration_fqlvla import FQLVLAConfig, is_image_feature
+
+# from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+# from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, make_att_2d_masks
+from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
+from lerobot.policies.gemma3nvla.modeling_gemma3n import Gemma3nForConditionalGeneration
+from lerobot.policies.gemma3nvla.modeling_gemma3nvla import Gemma3nVLAPolicy, make_att_2d_masks
 from lerobot.policies.normalize import NormalizeBuffer, UnnormalizeBuffer
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, make_att_2d_masks
 from lerobot.policies.utils import get_device_from_parameters
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
@@ -718,15 +721,25 @@ class FQLVLAPolicy(
         #     else SACObservationEncoder(self.config, self.normalize_inputs)
         # )
         if not self.config.no_bc_policy:
-            cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
-            # cfg_policy.n_obs_steps: int = 1
-            cfg_policy.chunk_size = self.config.chunk_size
-            cfg_policy.n_action_steps = self.config.chunk_size
-            # cfg_policy.train_state_proj = False
-            cfg_policy.max_action_dim = self.config.max_action_dim
-            cfg_policy.max_state_dim = self.config.max_state_dim
-            cfg_policy.num_vlm_layers = 8
-            cfg_policy.expert_width_multiplier = 0.5
+            # cfg_policy: Gemma3nVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
+            cfg_policy: Gemma3nVLAConfig = Gemma3nVLAConfig(
+                chunk_size=self.config.chunk_size,
+                n_action_steps=self.config.chunk_size,
+                max_action_dim=self.config.max_action_dim,
+                max_state_dim=self.config.max_state_dim,
+                num_vlm_layers=2,
+                expert_width_multiplier=0.5,
+                resize_imgs_with_padding=[256, 256],
+                load_vlm_weights=True,
+            )
+            # # cfg_policy.n_obs_steps: int = 1
+            # cfg_policy.chunk_size = self.config.chunk_size
+            # cfg_policy.n_action_steps = self.config.chunk_size
+            # # cfg_policy.train_state_proj = False
+            # cfg_policy.max_action_dim = self.config.max_action_dim
+            # cfg_policy.max_state_dim = self.config.max_state_dim
+            # cfg_policy.num_vlm_layers = 8
+            # cfg_policy.expert_width_multiplier = 0.5
 
             cfg_policy.normalization_mapping = {
                 "VISUAL": NormalizationMode.IDENTITY,
@@ -759,11 +772,20 @@ class FQLVLAPolicy(
             # cfg_policy.input_features = {key: ft for key, ft in features.items() if key not in cfg_policy.output_features}
             kwargs["config"] = cfg_policy
 
-            self.vlm: SmolVLMForConditionalGeneration = AutoModelForImageTextToText.from_pretrained(
-                pretrained_model_name_or_path="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+            # self.vlm: SmolVLMForConditionalGeneration = AutoModelForImageTextToText.from_pretrained(
+            #     pretrained_model_name_or_path="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+            #     device_map="auto",
+            #     torch_dtype="bfloat16",
+            #     low_cpu_mem_usage=True,
+            # )
+            vlm_config = AutoConfig.from_pretrained(cfg_policy.vlm_model_name)
+            vlm_config.text_config.num_hidden_layers = cfg_policy.num_vlm_layers
+            self.vlm: Gemma3nForConditionalGeneration = Gemma3nForConditionalGeneration.from_pretrained(
+                pretrained_model_name_or_path=cfg_policy.vlm_model_name,
                 device_map="auto",
                 torch_dtype="bfloat16",
                 low_cpu_mem_usage=True,
+                config=vlm_config,
             )
             # self.vlm.model.text_model.layers = self.vlm.model.text_model.layers[:cfg_policy.num_vlm_layers]
 
@@ -774,7 +796,7 @@ class FQLVLAPolicy(
                 # SmolVLAPolicy.from_pretrained(
                 #     pretrained_name_or_path="lerobot/smolvla_base", vlm=self.vlm, **kwargs
                 # ),
-                SmolVLAPolicy(vlm=self.vlm, **kwargs),
+                Gemma3nVLAPolicy(vlm=self.vlm, **kwargs),
             )
 
             # self.encoder_actor_bc_flow = (
@@ -947,7 +969,7 @@ class FQLVLAPolicy(
 class SACObservationEncoderVLA(nn.Module):
     """Encode image and/or state vector observations."""
 
-    def __init__(self, config: FQLVLAConfig, vla: SmolVLAPolicy) -> None:
+    def __init__(self, config: FQLVLAConfig, vla: Gemma3nVLAPolicy) -> None:
         super().__init__()
         self.config = config
         self.vla = vla

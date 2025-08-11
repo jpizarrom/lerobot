@@ -13,29 +13,15 @@
 # limitations under the License.
 
 import copy
-from typing import List, Optional
 
 import torch
 from torch import nn
 from transformers import (
     AutoConfig,
-    AutoModel,
-    AutoModelForImageTextToText,
     AutoProcessor,
-    # Gemma3nForConditionalGeneration,
-    Gemma3nPreTrainedModel,
-    GenerationMixin,
-    Gemma3nConfig,
 )
 
-from transformers.models.gemma3n.modeling_gemma3n import (
-    Gemma3nMultimodalEmbedder,
-    Gemma3nTextConfig,
-    Gemma3nTextScaledWordEmbedding,
-    Gemma3nTextDecoderLayer,
-    Gemma3nRMSNorm,
-    Gemma3nTextRotaryEmbedding,
-)
+from lerobot.policies.gemma3nvla.modeling_gemma3n import Gemma3nForConditionalGeneration, Gemma3nTextModel
 
 
 def apply_rope(x, positions, max_wavelength=10_000):
@@ -70,175 +56,6 @@ def get_intermediate_size(hidden_dim, ffn_dim_multiplier=4, multiple_of=256):
     hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
     return hidden_dim
 
-class Gemma3nTextModel(Gemma3nPreTrainedModel):
-    config_class = Gemma3nTextConfig
-
-    def __init__(self, config: Gemma3nTextConfig):
-        super().__init__(config)
-        self.padding_idx = config.pad_token_id
-        # self.vocab_size = config.vocab_size
-
-        # Gemma3n downcasts the below to bfloat16, causing sqrt(3072)=55.4256 to become 55.5. See https://github.com/huggingface/transformers/pull/29402
-        if config.vocab_size:
-            self.embed_tokens = Gemma3nTextScaledWordEmbedding(
-                config.vocab_size, config.hidden_size, self.padding_idx, embed_scale=self.config.hidden_size**0.5
-            )
-        self.layers = nn.ModuleList(
-            [Gemma3nTextDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
-
-        self.norm = Gemma3nRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # self.rotary_emb = Gemma3nTextRotaryEmbedding(config=config)
-        self.gradient_checkpointing = False
-
-        # TODO (raushan): Fix this after RoPE refactor. For now we hack it by
-        # reassigning thetas when we want to create a local RoPE layer. Config
-        # defaults should hold values for global RoPE.
-        # config = copy.deepcopy(config)
-        # config.rope_theta = config.rope_local_base_freq
-        # config.rope_scaling = {"rope_type": "default"}
-        # self.rotary_emb_local = Gemma3nTextRotaryEmbedding(config=config)
-
-        self.hidden_size = config.hidden_size
-        # self.hidden_size_per_layer_input = config.hidden_size_per_layer_input
-
-        # self.embed_tokens_per_layer = Gemma3nTextScaledWordEmbedding(
-        #     config.vocab_size_per_layer_input,
-        #     config.num_hidden_layers * config.hidden_size_per_layer_input,
-        #     self.padding_idx,
-        #     embed_scale=config.hidden_size_per_layer_input**0.5,
-        # )
-
-        # self.per_layer_model_projection = nn.Linear(
-        #     self.hidden_size,
-        #     config.num_hidden_layers * config.hidden_size_per_layer_input,
-        #     bias=False,
-        # )
-
-        # self.per_layer_projection_norm = Gemma3nRMSNorm(config.hidden_size_per_layer_input, eps=config.rms_norm_eps)
-
-        # self.altup_projections = nn.ModuleList(
-        #     [nn.Linear(self.hidden_size, self.hidden_size, bias=False) for _ in range(1, self.config.altup_num_inputs)]
-        # )
-
-        # self.altup_unembed_projections = nn.ModuleList(
-        #     [nn.Linear(self.hidden_size, self.hidden_size, bias=False) for _ in range(1, self.config.altup_num_inputs)]
-        # )
-
-        # self.register_buffer("per_layer_projection_scale", torch.tensor(self.hidden_size**-0.5), persistent=False)
-        # self.register_buffer("per_layer_input_scale", torch.rsqrt(torch.tensor(2.0)), persistent=False)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
-
-class Gemma3nModel(Gemma3nPreTrainedModel):
-    _checkpoint_conversion_mapping = {}
-    # we are filtering the logits/labels so we shouldn't divide the loss based on num_items_in_batch
-    accepts_loss_kwargs = False
-
-    def __init__(self, config: Gemma3nConfig):
-        super().__init__(config)
-        self.vision_tower = AutoModel.from_config(config=config.vision_config)
-        self.vocab_size = config.text_config.vocab_size
-
-        language_model = Gemma3nTextModel(config=config.text_config)
-        self.language_model = language_model
-
-        self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
-        self.vocab_size_per_layer_input = config.text_config.vocab_size_per_layer_input
-        # self.audio_tower = AutoModel.from_config(config.audio_config)
-        self.embed_vision = Gemma3nMultimodalEmbedder(config.vision_config, config.text_config)
-        # self.embed_audio = Gemma3nMultimodalEmbedder(config.audio_config, config.text_config)
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.language_model.get_input_embeddings()
-
-    def set_input_embeddings(self, value):
-        self.language_model.set_input_embeddings(value)
-
-    def set_decoder(self, decoder):
-        self.language_model = decoder
-
-    def get_decoder(self):
-        return self.language_model
-
-    def get_image_features(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """
-        Projects the last hidden state from the vision model into language model space.
-
-        Args:
-            pixel_values (`torch.FloatTensor]` of shape `(batch_size, channels, height, width)`)
-               The tensors corresponding to the input images.
-
-        Returns:
-            image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
-        """
-        vision_outputs = self.vision_tower(
-            pixel_values=pixel_values, do_pooling=False, return_dict=True
-        ).last_hidden_state
-        # Convert from (batch, channels, height, width) to (batch, height * width, channels) where:
-        # height == width and height * width == Gemma3nConfig.vision_soft_tokens_per_image.
-        vision_outputs = vision_outputs.reshape(
-            vision_outputs.shape[0],
-            self.config.vision_config.hidden_size,
-            self.config.vision_soft_tokens_per_image,
-        ).permute(0, 2, 1)
-        # Normalize and embed the soft tokens into language model space.
-        vision_outputs *= self.config.vision_config.hidden_size**0.5
-        return self.embed_vision(inputs_embeds=vision_outputs)
-
-class Gemma3nForConditionalGeneration(Gemma3nPreTrainedModel, GenerationMixin):
-    _checkpoint_conversion_mapping = {}
-    _tied_weights_keys = ["lm_head.weight"]
-    base_model_prefix = "model"
-
-    def __init__(self, config: Gemma3nConfig):
-        super().__init__(config)
-        self.model = Gemma3nModel(config)
-        self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.get_input_embeddings()
-
-    def set_input_embeddings(self, value):
-        self.model.set_input_embeddings(value)
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model.set_decoder(decoder)
-
-    def get_decoder(self):
-        return self.model.get_decoder()
-
-    def get_image_features(self, pixel_values):
-        return self.model.get_image_features(pixel_values)
-
-    # Make modules available throught conditional class for BC
-    @property
-    def language_model(self):
-        return self.model.language_model
-
-    @property
-    def vision_tower(self):
-        return self.model.vision_tower
-
-    @property
-    def multi_modal_projector(self):
-        raise AttributeError("Use embed_vision instead of multi_modal_projector.")
-
 
 class Gemma3nWithExpertModel(nn.Module):
     def __init__(
@@ -252,42 +69,51 @@ class Gemma3nWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
+        vlm: Gemma3nForConditionalGeneration | None = None,
     ):
         super().__init__()
         if load_vlm_weights:
             print(f"Loading  {model_id} weights ...")
-            config = AutoConfig.from_pretrained(model_id)
-            config.text_config.num_hidden_layers = num_vlm_layers
-            self.vlm = Gemma3nForConditionalGeneration.from_pretrained(
-                model_id,
-                device_map="auto",
-                torch_dtype="bfloat16",
-                low_cpu_mem_usage=True,
-                config=config,
-            )
+            # config = AutoConfig.from_pretrained(model_id)
+            # config.text_config.num_hidden_layers = num_vlm_layers
+            # self.vlm = Gemma3nForConditionalGeneration.from_pretrained(
+            #     model_id,
+            #     device_map="auto",
+            #     torch_dtype="bfloat16",
+            #     low_cpu_mem_usage=True,
+            #     config=config,
+            # )
+            self.vlm = vlm
             config = self.vlm.config
         else:
+            raise ValueError(
+                "Loading VLM weights is required for Gemma3nWithExpertModel. Set `load_vlm_weights=True`."
+            )
             config = AutoConfig.from_pretrained(model_id)
             config.text_config.num_hidden_layers = num_vlm_layers
             self.vlm = Gemma3nForConditionalGeneration(config=config)
         self.processor = AutoProcessor.from_pretrained(model_id)
         if num_vlm_layers > 0:
             print(f"Reducing the number of VLM layers to {num_vlm_layers} ...")
-            self.get_vlm_model().language_model.layers = self.get_vlm_model().language_model.layers[:num_vlm_layers]
+            self.get_vlm_model().language_model.layers = self.get_vlm_model().language_model.layers[
+                :num_vlm_layers
+            ]
         self.num_vlm_layers = len(self.get_vlm_model().language_model.layers)
         self.config = config
         # Smaller lm expert
         lm_expert_config = copy.deepcopy(config.text_config)
         hidden_size = lm_expert_config.hidden_size
         lm_expert_config.hidden_size = int(hidden_size * expert_width_multiplier)  # hidden_size // 2
-        lm_expert_config.intermediate_size = [get_intermediate_size(int(hidden_size * expert_width_multiplier))]*self.num_vlm_layers
+        lm_expert_config.intermediate_size = [
+            get_intermediate_size(int(hidden_size * expert_width_multiplier))
+        ] * self.num_vlm_layers
         lm_expert_config.num_hidden_layers = self.num_vlm_layers
         if num_expert_layers > 0:
             assert len(self.get_vlm_model().text_model.layers) % num_expert_layers == 0, (
                 f"Number of layers in the VLM {len(self.get_vlm_model().text_model.layers)} are not multiple of num_expert_layers {num_expert_layers}"
             )
             lm_expert_config.num_hidden_layers = num_expert_layers
-        
+
         lm_expert_config.vocab_size = None
         # self.lm_expert = AutoModel.from_config(lm_expert_config)
         self.lm_expert = Gemma3nTextModel(lm_expert_config)
@@ -383,8 +209,7 @@ class Gemma3nWithExpertModel(nn.Module):
         # patch_attention_mask = None
         # Get sequence from the vision encoder
         image_hidden_states = (
-            self.get_vlm_model()
-            .get_image_features(
+            self.get_vlm_model().get_image_features(
                 pixel_values=image.to(dtype=self.get_vlm_model().vision_tower.dtype),
                 # patch_attention_mask=patch_attention_mask,
             )
@@ -606,12 +431,12 @@ class Gemma3nWithExpertModel(nn.Module):
 
     def forward(
         self,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: List[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        inputs_embeds: list[torch.FloatTensor] = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
     ):
         models = [self.get_vlm_model().language_model, self.lm_expert]
         model_layers = self.get_model_layers(models)

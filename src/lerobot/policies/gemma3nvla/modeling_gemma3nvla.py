@@ -64,13 +64,14 @@ from torch import Tensor, nn
 from transformers import AutoProcessor
 
 from lerobot.constants import ACTION, OBS_STATE
+from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
+from lerobot.policies.gemma3nvla.gemma3n_with_expert import Gemma3nWithExpertModel
+from lerobot.policies.gemma3nvla.modeling_gemma3n import Gemma3nForConditionalGeneration
 from lerobot.policies.normalize import (
     Normalize,
     Unnormalize,
 )
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.policies.gemma3nvla.configuration_gemma3nvla import Gemma3nVLAConfig
-from lerobot.policies.gemma3nvla.gemma3n_with_expert import Gemma3nWithExpertModel
 from lerobot.policies.utils import (
     populate_queues,
 )
@@ -169,7 +170,7 @@ def load_smolvla(
     #         len(missing),
     #         len(unexpected),
     #     )
-    
+
     # release memory
     del state_dict
 
@@ -336,6 +337,7 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         self,
         config: Gemma3nVLAConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+        vlm: Gemma3nForConditionalGeneration | None = None,
     ):
         """
         Args:
@@ -357,7 +359,7 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         )
 
         self.language_tokenizer = AutoProcessor.from_pretrained(self.config.vlm_model_name).tokenizer
-        self.model = VLAFlowMatching(config)
+        self.model = VLAFlowMatching(config, vlm=vlm)
         self.reset()
 
     def reset(self):
@@ -379,7 +381,7 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         # https://github.com/huggingface/transformers/blob/ccf2ca162e33f381e454cdb74bf4b41a51ab976d/src/transformers/trainer.py#L2853
         # We load the model state dict on the CPU to avoid an OOM error.
         state_dict = safetensors.torch.load_file(model_file, device="cpu")
-        load_result = model.load_state_dict(state_dict, strict=False)
+        _ = model.load_state_dict(state_dict, strict=False)
         # release memory
         del state_dict
         # logging.info(f"load_result {load_result}")
@@ -469,7 +471,9 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        losses, v_t = self.model.forward(
+            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
+        )
         loss_dict["losses_after_forward"] = losses.clone()
 
         if actions_is_pad is not None:
@@ -485,7 +489,7 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         loss = losses.mean()
         # For backward pass
         loss_dict["loss"] = loss.item()
-        return loss, loss_dict
+        return loss, loss_dict, v_t
 
     def prepare_images(self, batch):
         """Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
@@ -641,7 +645,7 @@ class VLAFlowMatching(nn.Module):
     └──────────────────────────────┘
     """
 
-    def __init__(self, config):
+    def __init__(self, config, vlm: Gemma3nForConditionalGeneration | None = None):
         super().__init__()
         self.config = config
 
@@ -655,6 +659,7 @@ class VLAFlowMatching(nn.Module):
             num_vlm_layers=self.config.num_vlm_layers,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
+            vlm=vlm,
         )
         self.state_proj = nn.Linear(
             self.config.max_state_dim, self.vlm_with_expert.config.text_config.hidden_size
@@ -874,7 +879,7 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
-        return losses
+        return losses, v_t
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
