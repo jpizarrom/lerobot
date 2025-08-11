@@ -642,12 +642,6 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
         # actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
         # policy.actor_onestep_flow.load_state_dict(actor_state_dict, strict=False)
 
-        # Load actor state dict if present
-        if hasattr(policy, "actor_onestep_flow") and "policy" in state_dicts:
-            actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
-            policy.actor_onestep_flow.load_state_dict(actor_state_dict, strict=False)
-            logging.info("[ACTOR] Loaded actor parameters from Learner.")
-
         # Load actor_onestep_flow if present
         if hasattr(policy, "actor_onestep_flow") and "actor_onestep_flow" in state_dicts:
             actor_onestep_flow_state_dict = move_state_dict_to_device(state_dicts["actor_onestep_flow"], device=device)
