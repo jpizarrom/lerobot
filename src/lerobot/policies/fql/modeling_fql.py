@@ -113,9 +113,9 @@ class FQLPolicy(
 
     @torch.no_grad()
     def compute_discrete_flow_actions(
-        self, batch: dict[str, Tensor], discrete_noises: Tensor
+        self, batch: dict[str, Tensor], discrete_noises: Tensor = None
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Compute discrete actions using BC flow matching."""
+        """Compute discrete actions using proper discrete flow matching sampling exactly following reference."""
         observations_features = None
         if self.shared_encoder and self.discrete_actor_bc_flow.encoder.has_images:
             # Cache and normalize image features
@@ -123,37 +123,70 @@ class FQLPolicy(
                 batch, normalize=True
             )
 
-        # Start from noise
-        discrete_latents = discrete_noises
-        flow_steps = self.config.flow_steps
+        batch_size = batch["observation.state"].shape[0]
+        chunk_size = self.config.chunk_size  # D in reference
+        device = batch["observation.state"].device
+        S = self.config.num_discrete_actions  # S in reference
+        
+        # Sampling exactly following the reference pattern
+        t = 0.0
+        dt = 1.0 / self.config.flow_steps  # or use 0.001 as in reference
+        noise = 1.0  # noise parameter from reference
+        
+        # Start from random tokens: xt = torch.randint(0, S, (num_samples, D))
+        xt = torch.randint(0, S, (batch_size, chunk_size), device=device)
+        
+        # Flow matching sampling loop exactly following reference
+        while t < 1.0:
+            # Get model predictions: logits = model(xt, t * torch.ones((num_samples,)))
+            t_tensor = torch.full((batch_size,), t, device=device)
+            t_expanded = t_tensor.unsqueeze(-1)  # [batch_size, 1] for network
+            
+            logits, _, _ = self.discrete_actor_bc_flow(
+                batch, observations_features, xt, t_expanded
+            )  # [batch_size, chunk_size, num_discrete_actions] -> (B, D, S)
+            
+            # Convert to probabilities: x1_probs = F.softmax(logits, dim=-1)
+            x1_probs = F.softmax(logits, dim=-1)  # (B, D, S)
+            
+            # Get probabilities at current state: x1_probs_at_xt = torch.gather(x1_probs, -1, xt[:, :, None])
+            x1_probs_at_xt = torch.gather(x1_probs, -1, xt.unsqueeze(-1))  # (B, D, 1)
+            
+            # Don't add noise on the final step
+            if t + dt < 1.0:
+                N = noise
+            else:
+                N = 0
+            
+            # Calculate the off-diagonal step probabilities exactly following reference
+            step_probs = (
+                dt * ((1 + N + N * (S - 1) * t) / (1 - t)) * x1_probs + 
+                dt * N * x1_probs_at_xt
+            ).clamp(max=1.0)  # (B, D, S)
+            
+            # Calculate the on-diagonal step probabilities exactly following reference
+            # 1) Zero out the diagonal entries
+            step_probs.scatter_(-1, xt.unsqueeze(-1), 0.0)
+            # 2) Calculate the diagonal entries such that the probability row sums to 1
+            diagonal_probs = (1.0 - step_probs.sum(dim=-1, keepdim=True)).clamp(min=0.0)
+            step_probs.scatter_(-1, xt.unsqueeze(-1), diagonal_probs)
+            
+            # Sample next state: xt = Categorical(step_probs).sample()
+            # Need to handle the sampling correctly for the (B, D, S) tensor
+            step_probs_flat = step_probs.view(-1, S)  # Flatten to (B*D, S)
+            xt_flat = Categorical(step_probs_flat).sample()  # Sample (B*D,)
+            xt = xt_flat.view(batch_size, chunk_size)  # Reshape back to (B, D)
+            
+            t += dt
 
-        # Euler method for discrete flow integration
-        for i in range(flow_steps):
-            t_val = float(i) / flow_steps
-            t = torch.full((discrete_latents.shape[0], 1), t_val, device=discrete_noises.device)
-            velocity, _, _ = self.discrete_actor_bc_flow(batch, observations_features, discrete_latents, t)
-            discrete_latents = discrete_latents + velocity / flow_steps
-
-        # Final forward pass to get action probabilities
-        # Use t=1.0 for final step (end of flow)
-        t_final = torch.ones((discrete_latents.shape[0], 1), device=discrete_noises.device)
-        _, log_probs, action_probs = self.discrete_actor_bc_flow(
-            batch, observations_features, discrete_latents, t_final
+        # Final forward pass to get final probabilities
+        t_final = torch.ones((batch_size,), device=device)
+        t_final_expanded = t_final.unsqueeze(-1)
+        logits, log_probs, action_probs = self.discrete_actor_bc_flow(
+            batch, observations_features, xt, t_final_expanded
         )
 
-        # Sample actions from final probabilities
-        batch_size = action_probs.shape[0]
-        chunk_size = action_probs.shape[1]
-        # Sample actions for each chunk in a vectorized way
-        # action_probs: [batch_size, chunk_size, num_discrete_actions]
-        # Reshape to [batch_size * chunk_size, num_discrete_actions]
-        flat_probs = action_probs.reshape(-1, action_probs.shape[-1])
-        flat_dist = Categorical(probs=flat_probs)
-        flat_actions = flat_dist.sample()  # [batch_size * chunk_size]
-        # Reshape back to [batch_size, chunk_size]
-        sampled_actions = flat_actions.view(action_probs.shape[0], action_probs.shape[1])
-
-        return sampled_actions, log_probs, action_probs
+        return xt, log_probs, action_probs
 
     @torch.no_grad()
     def compute_flow_actions(self, batch: dict[str, Tensor], noises: Tensor) -> Tensor:
@@ -205,16 +238,24 @@ class FQLPolicy(
             actions = torch.clamp(actions, -1.0, 1.0)
             # actions = self.unnormalize_targets({"action": actions})["action"]
             if self.config.num_discrete_actions is not None:
-                # Use one-step forward for discrete actions
-                discrete_action_dim = self.discrete_actor.action_dim
-                discrete_noises = torch.randn(batch_shape, discrete_action_dim, device=device)
-                discrete_velocity, _, _ = self.discrete_actor(batch, observations_features, discrete_noises)
-                # Convert to float and add as last dimension
-                discrete_logits = discrete_velocity.reshape(batch_shape, -1, self.config.num_discrete_actions)
-                discrete_dist = Categorical(logits=discrete_logits)
-                discrete_actions = discrete_dist.sample()
-                # discrete_actions_float = discrete_actions.float()
-                discrete_actions = discrete_actions.unsqueeze(-1)
+                # Use discrete one-step flow for discrete actions
+                chunk_size = self.config.chunk_size
+                
+                # Start with random tokens from the discrete action space
+                discrete_tokens = torch.randint(
+                    0, self.config.num_discrete_actions,
+                    (batch_shape, chunk_size), 
+                    dtype=torch.long, 
+                    device=device
+                )
+                
+                # One-step prediction using discrete actor (no time input for one-step)
+                discrete_logits, _, _ = self.discrete_actor(batch, observations_features, discrete_tokens)
+                discrete_dist = Categorical(logits=discrete_logits.view(-1, self.config.num_discrete_actions))
+                discrete_actions = discrete_dist.sample().view(batch_shape, chunk_size)
+                
+                # Add as last dimension
+                discrete_actions = discrete_actions.unsqueeze(-1).float()
                 actions = torch.cat([actions, discrete_actions], dim=-1)
 
             self._action_queue.extend(actions.transpose(0, 1))
@@ -575,14 +616,19 @@ class FQLPolicy(
             # Use discrete flow matching for next action sampling
             batch_size = next_observations["observation.state"].shape[0]
             device = next_observations["observation.state"].device
-            action_dim = self.config.num_discrete_actions * self.config.chunk_size
+            chunk_size = self.config.chunk_size
 
-            # Sample noise for discrete flow
-            discrete_noises = torch.randn(batch_size, action_dim, device=device)
+            # Start with random tokens for discrete actor (one-step flow)
+            discrete_tokens = torch.randint(
+                0, self.config.num_discrete_actions,
+                (batch_size, chunk_size), 
+                dtype=torch.long, 
+                device=device
+            )
 
             # Get next action probabilities using discrete_actor (one-step flow)
             _, next_log_probs, next_action_probs = self.discrete_actor(
-                next_observations, next_observation_features, discrete_noises
+                next_observations, next_observation_features, discrete_tokens
             )
             # next_actions [batch_size, chunk_size]
             # next_log_probs [batch_size, chunk_size, num_discrete_actions]
@@ -764,55 +810,64 @@ class FQLPolicy(
         actions: Tensor | None,
         actions_is_pad: Tensor | None,
     ) -> Tensor:
-        """Compute discrete behavioral cloning flow matching loss."""
+        """Compute discrete behavioral cloning flow matching loss exactly following the reference pattern."""
         # Extract discrete actions from the action tensor
         actions_discrete: Tensor = actions[:, :, DISCRETE_DIMENSION_INDEX:].clone()
 
         # Ensure discrete actions are integers and in valid range
         actions_discrete = torch.clamp(actions_discrete, 0, self.config.num_discrete_actions - 1)
-        actions_discrete = torch.round(actions_discrete).long().squeeze(-1)  # [batch_size, chunk_size]
+        x1 = torch.round(actions_discrete).long().squeeze(-1)  # [batch_size, chunk_size] - this is our target
 
-        batch_size = actions_discrete.shape[0]
-        chunk_size = actions_discrete.shape[1]
-        action_dim = self.config.num_discrete_actions * chunk_size
+        batch_size = x1.shape[0]
+        chunk_size = x1.shape[1]  # D in reference
         device = observations["observation.state"].device
-
-        # Convert discrete actions to one-hot representation for flow matching
-        actions_one_hot = F.one_hot(actions_discrete, num_classes=self.config.num_discrete_actions).float()
-        actions_one_hot = actions_one_hot.view(batch_size, -1)  # [batch_size, action_dim]
-
-        # Sample noise as starting point
-        discrete_noises = torch.randn(batch_size, action_dim, device=device)
-
-        # Sample random time steps
-        t = torch.rand(batch_size, 1, device=device)
-
-        # Interpolate between noise and target actions: x_t = (1 - t) * x_0 + t * x_1
-        discrete_latents_t = (1 - t) * discrete_noises + t * actions_one_hot
-
-        # True velocity is the difference between target and noise
-        velocity_target = actions_one_hot - discrete_noises
-
-        # Predict velocity using discrete BC flow actor
-        velocity_pred, _, _ = self.discrete_actor_bc_flow(
-            observations, observation_features, discrete_latents_t, t
-        )
-
-        # Compute flow matching loss
-        bc_flow_loss = F.mse_loss(velocity_pred, velocity_target, reduction="none")
-
-        # Apply action padding mask
+        S = self.config.num_discrete_actions  # S in reference
+        
+        # Sample random time steps - following reference: t = torch.rand((B,))
+        t = torch.rand(batch_size, device=device)  # [batch_size]
+        
+        # Create corrupted sequence exactly following the reference pattern
+        xt = x1.clone()  # Start with target actions
+        
+        # Create uniform noise: uniform_noise = torch.randint(0, S, (B, D))
+        uniform_noise = torch.randint(0, S, (batch_size, chunk_size), device=device)
+        
+        # Create corruption mask: corrupt_mask = torch.rand((B, D)) < (1 - t[:, None])
+        corrupt_mask = torch.rand((batch_size, chunk_size), device=device) < (1 - t[:, None])
+        
+        # Apply corruption: xt[corrupt_mask] = uniform_noise[corrupt_mask]
+        xt[corrupt_mask] = uniform_noise[corrupt_mask]
+        
+        # Predict logits using discrete BC flow actor
+        # Pass time with correct shape for the network
+        t_expanded = t.unsqueeze(-1)  # [batch_size, 1] for network compatibility
+        logits, _, _ = self.discrete_actor_bc_flow(
+            observations, observation_features, xt, t_expanded
+        )  # [batch_size, chunk_size, num_discrete_actions] -> (B, D, S)
+        
+        # Compute cross-entropy loss exactly following reference pattern
+        # loss = F.cross_entropy(logits.transpose(1,2), x1, reduction='mean', ignore_index=-1)
+        bc_flow_loss = F.cross_entropy(
+            logits.transpose(1, 2),  # [batch_size, num_discrete_actions, chunk_size] -> (B, S, D)
+            x1,  # [batch_size, chunk_size] -> (B, D)
+            reduction='none',  # We'll handle reduction manually for padding
+            ignore_index=-1
+        )  # -> (B, D)
+        
+        # Apply action padding mask if provided
         if actions_is_pad is not None:
-            # Reshape loss to match action structure [batch_size, chunk_size, num_discrete_actions]
-            bc_flow_loss = bc_flow_loss.view(batch_size, chunk_size, self.config.num_discrete_actions)
             # Apply mask to valid timesteps
-            chunk_mask = (~actions_is_pad).float().unsqueeze(-1)  # [batch_size, chunk_size, 1]
+            chunk_mask = (~actions_is_pad).float()  # [batch_size, chunk_size]
             bc_flow_loss = bc_flow_loss * chunk_mask
-
-        bc_flow_loss = bc_flow_loss.mean()
+            # Average over valid timesteps only
+            bc_flow_loss = bc_flow_loss.sum() / chunk_mask.sum().clamp(min=1.0)
+        else:
+            # Standard mean reduction
+            bc_flow_loss = bc_flow_loss.mean()
 
         info = {
-            # "bc_flow_loss": bc_flow_loss,
+            "corruption_rate": (1 - t).mean(),
+            "accuracy": (logits.argmax(dim=-1) == x1).float().mean(),
         }
 
         return bc_flow_loss, info
@@ -825,33 +880,35 @@ class FQLPolicy(
     ) -> Tensor:
         """Compute discrete one-step flow loss with distillation and Q-learning."""
         batch_size = observations["observation.state"].shape[0]
-        action_dim = self.config.num_discrete_actions * self.config.chunk_size
+        chunk_size = self.config.chunk_size
         device = observations["observation.state"].device
-
-        # Sample noise for one-step flow
-        discrete_noises = torch.randn(batch_size, action_dim, device=device)
 
         # Get target action distribution from BC flow (distillation target)
         target_actions, target_log_probs, target_action_probs = self.compute_discrete_flow_actions(
-            observations, discrete_noises
+            observations
         )
         # target_actions: [batch_size, chunk_size]
         # target_log_probs: [batch_size, chunk_size, num_discrete_actions]
         # target_action_probs: [batch_size, chunk_size, num_discrete_actions]
 
-        # Predict action distribution using one-step flow
-        predicted_velocity, predicted_log_probs, predicted_action_probs = self.discrete_actor(
-            observations, observation_features, discrete_noises
+        # Start with random tokens for one-step prediction
+        discrete_tokens = torch.randint(
+            0, self.config.num_discrete_actions,
+            (batch_size, chunk_size), 
+            dtype=torch.long, 
+            device=device
         )
-        # predicted_velocity: [batch_size, chunk_size, num_discrete_actions]
+
+        # Predict action distribution using one-step flow (no time input)
+        predicted_logits, predicted_log_probs, predicted_action_probs = self.discrete_actor(
+            observations, observation_features, discrete_tokens
+        )
+        # predicted_logits: [batch_size, chunk_size, num_discrete_actions]
         # predicted_log_probs: [batch_size, chunk_size, num_discrete_actions]
         # predicted_action_probs: [batch_size, chunk_size, num_discrete_actions]
 
         # Distillation loss: match one-step policy to BC flow target distribution
-        # Use KL(target || predicted) implemented as kl_div(input=pred_action_probs, target=target_action_probs)
-        # distill_loss = F.kl_div(
-        #     input=predicted_action_probs, target=target_action_probs, reduction="batchmean"
-        # )
+        # Use MSE between action probabilities for stability
         distill_loss = F.mse_loss(predicted_action_probs, target_action_probs)
 
         # Q loss: maximize expected Q under the predicted discrete action distribution
@@ -1036,34 +1093,40 @@ class FQLPolicy(
 
     def _init_discrete_bc_flow(self):
         """Initialize discrete BC flow matching actor."""
+        embedding_dim = 16  # Default embedding dimension following reference
+        # Calculate input dimension for the base network
+        base_input_dim = self.encoder_discrete_actor_bc_flow.output_dim
+        
         self.discrete_actor_bc_flow = DiscreteActorVectorFieldPolicy(
             encoder=self.encoder_discrete_actor_bc_flow,
             network=MLP(
-                input_dim=self.encoder_discrete_actor_bc_flow.output_dim
-                + (self.config.num_discrete_actions * self.config.chunk_size)
-                + 1,  # +1 for time dimension
+                input_dim=base_input_dim,
                 **asdict(self.config.discrete_actor_network_kwargs),
             ),
             action_dim=self.config.num_discrete_actions * self.config.chunk_size,
             num_discrete_actions=self.config.num_discrete_actions,
             encoder_is_shared=self.shared_encoder,
+            embedding_dim=embedding_dim,
             **asdict(self.config.discrete_policy_kwargs),
         )
 
     def _init_discrete_onestep_flow(self):
         """Initialize discrete one-step flow matching actor."""
+        embedding_dim = 16  # Default embedding dimension following reference
+        # Calculate input dimension for the base network
+        base_input_dim = self.encoder_discrete_actor_onestep_flow.output_dim
+        
         self.discrete_actor = DiscreteActorVectorFieldPolicy(
             encoder=self.encoder_discrete_actor_onestep_flow,
             network=MLP(
-                input_dim=self.encoder_discrete_actor_onestep_flow.output_dim
-                + (
-                    self.config.num_discrete_actions * self.config.chunk_size
-                ),  # No time dimension for one-step
+                input_dim=base_input_dim,
                 **asdict(self.config.discrete_actor_network_kwargs),
             ),
             action_dim=self.config.num_discrete_actions * self.config.chunk_size,
             num_discrete_actions=self.config.num_discrete_actions,
             encoder_is_shared=self.shared_encoder,
+            embedding_dim=embedding_dim,
+            use_time=False,  # No time input for one-step flow
             **asdict(self.config.discrete_policy_kwargs),
         )
 
@@ -1788,8 +1851,8 @@ class DiscreteActorVectorFieldPolicy(nn.Module):
     """
     Discrete actor vector field network for flow matching.
 
-    This implements discrete flow matching by learning to predict velocity vectors
-    in a continuous space that get projected to discrete action probabilities.
+    This implements discrete flow matching using the exact pattern from the reference implementation
+    with embedding-based token representations and categorical cross-entropy loss.
     """
 
     def __init__(
@@ -1800,6 +1863,8 @@ class DiscreteActorVectorFieldPolicy(nn.Module):
         num_discrete_actions: int,
         init_final: float | None = None,
         encoder_is_shared: bool = False,
+        embedding_dim: int = 16,
+        use_time: bool = True,
     ):
         super().__init__()
         self.encoder: SACObservationEncoder = encoder
@@ -1807,63 +1872,95 @@ class DiscreteActorVectorFieldPolicy(nn.Module):
         self.action_dim = action_dim  # This is num_discrete_actions * chunk_size
         self.num_discrete_actions = num_discrete_actions
         self.encoder_is_shared = encoder_is_shared
+        self.chunk_size = action_dim // num_discrete_actions
+        self.embedding_dim = embedding_dim
 
-        # Find the last Linear layer's output dimension
+        # Embedding for discrete tokens (S+1 tokens including special token)
+        # Following the reference pattern: S+1 embedding size
+        self.token_embedding = nn.Embedding(num_discrete_actions + 1, embedding_dim)
+
+        # Find the last Linear layer's output dimension from the base network
         for layer in reversed(network.net):
             if isinstance(layer, nn.Linear):
                 out_features = layer.out_features
                 break
 
-        # Output layer for velocity field (same dimension as action space)
-        self.output_layer = nn.Linear(out_features, action_dim)
+        # Additional network layers following the reference pattern
+        # Input: observation encoding + flattened token embeddings with time
+        # Output: logits for each position and discrete action (S*D pattern)
+        self.flow_net = nn.Sequential(
+            nn.Linear(out_features + self.chunk_size * (self.embedding_dim + int(use_time)), 128),
+            nn.ReLU(),
+            nn.Linear(128, 128), 
+            nn.ReLU(),
+            nn.Linear(128, self.chunk_size * num_discrete_actions)
+        )
+        
         if init_final is not None:
-            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
-            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+            nn.init.uniform_(self.flow_net[-1].weight, -init_final, init_final)
+            nn.init.uniform_(self.flow_net[-1].bias, -init_final, init_final)
         else:
-            orthogonal_init()(self.output_layer.weight)
+            orthogonal_init()(self.flow_net[-1].weight)
 
     def forward(
         self,
         observations: torch.Tensor,
         observation_features: torch.Tensor | None,
-        actions: torch.Tensor,
+        discrete_tokens: torch.Tensor,
         times: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Return the velocity vectors for discrete flow matching.
+        Forward pass for discrete flow matching following the reference pattern.
 
         Args:
             observations: State observations
-            actions: Pre-computed observation features
-            discrete_latents: Latent continuous representations [batch_size, action_dim]
+            observation_features: Pre-computed observation features
+            discrete_tokens: Discrete token sequence [batch_size, chunk_size] with values in [0, num_discrete_actions]
+                           (num_discrete_actions can be used for special tokens if needed)
             times: Time steps for flow matching [batch_size, 1]
 
         Returns:
-            velocity: Velocity vectors [batch_size, action_dim]
+            logits: Raw logits [batch_size, chunk_size, num_discrete_actions]
             log_probs: Log probabilities [batch_size, chunk_size, num_discrete_actions]
             action_probs: Action probabilities [batch_size, chunk_size, num_discrete_actions]
         """
+        batch_size = discrete_tokens.shape[0]
+        
+        # Get observation encoding
         obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
 
-        inputs = [obs_enc, actions]
+        # Process through base network first
+        x = self.network(obs_enc)
+        
+        # Embed discrete tokens - following reference pattern (B, D, 16)
+        token_emb = self.token_embedding(discrete_tokens)  # [batch_size, chunk_size, embedding_dim]
+        
+        # Add time embedding if provided - following reference pattern
         if times is not None:
-            inputs.append(times)
-        x = torch.cat(inputs, dim=-1)
-
-        # Predict velocity vector
-        velocity = self.output_layer(self.network(x))
-
-        # Convert velocity to action probabilities for compatibility
-        # Reshape to [batch_size, chunk_size, num_discrete_actions]
-        batch_size = velocity.shape[0]
-        chunk_size = self.action_dim // self.num_discrete_actions
-
-        # For discrete flow matching, we interpret velocity as logits
-        logits = velocity.view(batch_size, chunk_size, self.num_discrete_actions)
+            # Expand time to match token dimensions: t[:, None, None].repeat(1, D, 1)
+            time_emb = times.unsqueeze(1).repeat(1, self.chunk_size, 1)  # [batch_size, chunk_size, 1]
+            # Concatenate time with token embeddings
+            net_input = torch.cat([token_emb, time_emb], dim=-1)  # [batch_size, chunk_size, embedding_dim + 1]
+        else:
+            net_input = token_emb
+        
+        # Flatten for network input following reference: (B, D * 17)
+        net_input_flat = net_input.reshape(batch_size, -1)
+        
+        # Combine with observation features
+        combined_input = torch.cat([x, net_input_flat], dim=-1)
+        
+        # Pass through flow network
+        logits_flat = self.flow_net(combined_input)
+        
+        # Reshape to (B, D, S) following reference pattern
+        logits = logits_flat.view(batch_size, self.chunk_size, self.num_discrete_actions)
+        
+        # Compute probabilities
         action_probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
 
-        return velocity, log_probs, action_probs
+        return logits, log_probs, action_probs
 
     # def sample_action(
     #     self,
