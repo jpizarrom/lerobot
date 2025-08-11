@@ -98,6 +98,16 @@ class DiscretePolicyConfig:
     init_final: float | None = None
 
 
+@dataclass
+class CalQLConfig:
+    enabled: bool = False
+    weight: float = 1.0
+    num_samples: int = 10
+    temperature: float = 1.0
+    sample_source: str = "uniform"  # ["uniform", "gaussian", "policy_noise"]
+    critic_agg: str = "min"  # ["min", "mean"]
+
+
 @PreTrainedConfig.register_subclass("fqlvla")
 @dataclass
 class FQLVLAConfig(PreTrainedConfig):
@@ -243,6 +253,9 @@ class FQLVLAConfig(PreTrainedConfig):
 
     # Optimizations
     use_torch_compile: bool = True
+
+    # Calibrated Q-Learning regularizer
+    calql: CalQLConfig = field(default_factory=CalQLConfig)
 
     def __post_init__(self):
         super().__post_init__()

@@ -410,9 +410,6 @@ class FQLVLAPolicy(
                     "Subsampling critics is not implemented yet. "
                     "Please set num_subsample_critics to None or implement the subsampling logic."
                 )
-                # indices = torch.randperm(self.config.num_critics)
-                # indices = indices[: self.config.num_subsample_critics]
-                # next_qs = next_qs[indices]
 
             # critics subsample size
             if self.config.q_agg == "min":
@@ -420,55 +417,105 @@ class FQLVLAPolicy(
             else:
                 next_q = next_qs.mean(dim=0)
 
-            # if self.config.use_backup_entropy:
-            #     min_q = min_q - (self.temperature * next_log_probs)
-
             td_target = rewards.squeeze(-1) + (1 - done) * discounts.squeeze(-1) * next_q
-            # td_target = rewards.squeeze(-1) + (1 - done) * self.config.discount * next_q
 
-        # 3- compute predicted qs
-        # if self.config.num_discrete_actions is not None:
-        #     # NOTE: We only want to keep the continuous action part
-        #     # In the buffer we have the full action space (continuous + discrete)
-        #     # We need to split them before concatenating them in the critic forward
-        #     actions: Tensor = actions[:, :, :DISCRETE_DIMENSION_INDEX]
-
-        # actions = pad_vector(actions, 32)
-        # actions = actions[:, 0, :3] # TODO: use all chunks
-        # actions = actions * (~actions_is_pad).unsqueeze(-1)
-        actions = actions[:, :, :].reshape(actions.shape[0], -1)  # [32, 150]
+        # Prepare predicted qs for dataset actions
+        flat_actions = actions[:, :, :].reshape(actions.shape[0], -1)  # [B, chunk*act]
 
         q_preds = self.critic_forward(
             observations=observations,
-            actions=actions,
+            actions=flat_actions,
             use_target=False,
             observation_features=observation_features,
             do_output_normalization=False,
         )
 
-        # 4- Calculate loss
-        # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
+        # 4- TD loss
         td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
-        # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
+        valid_mask = ~actions_is_pad[:, -1]
+        q_preds = q_preds[:, valid_mask]
+        td_target_duplicate = td_target_duplicate[:, valid_mask]
 
-        q_preds = q_preds[:, ~actions_is_pad[:, -1]]
-        td_target_duplicate = td_target_duplicate[:, ~actions_is_pad[:, -1]]
+        td_loss_per_critic = F.mse_loss(
+            input=q_preds,
+            target=td_target_duplicate,
+            reduction="none",
+        ).mean(dim=1)
+        critics_loss = td_loss_per_critic.sum()
 
-        critics_loss = (
-            F.mse_loss(
-                input=q_preds,
-                target=td_target_duplicate,
-                reduction="none",
-            ).mean(dim=1)
-        ).sum()
+        calql_loss = torch.tensor(0.0, device=q_preds.device)
+        if getattr(self.config, "calql", None) and self.config.calql.enabled:
+            # Sample negative actions per state in normalized space [-1,1]
+            num_samples = self.config.calql.num_samples
+            temperature = self.config.calql.temperature
+            sample_source = self.config.calql.sample_source
+
+            with torch.no_grad():
+                B = observations["observation.state"].shape[0]
+                # sample in flattened space matching flat_actions shape
+                flat_dim = flat_actions.shape[1]
+                if sample_source == "uniform":
+                    sampled_flat = torch.empty(B, num_samples, flat_dim, device=flat_actions.device).uniform_(-1, 1)
+                elif sample_source == "gaussian":
+                    # Gaussian around zero in normalized space, clipped to [-1,1]
+                    sampled_flat = torch.randn(B, num_samples, flat_dim, device=flat_actions.device) * 0.5
+                    sampled_flat = sampled_flat.clamp(-1, 1)
+                else:  # policy_noise
+                    eps = torch.randn(B, num_samples, flat_dim, device=flat_actions.device) * 0.2
+                    base = flat_actions.unsqueeze(1).expand(-1, num_samples, -1)
+                    sampled_flat = (base + eps).clamp(-1, 1)
+
+            # Evaluate Q for sampled actions
+            # We need to tile observations for num_samples
+            obs_tiled = {k: v.unsqueeze(1).expand(-1, num_samples, *v.shape[1:]).reshape(-1, *v.shape[1:])
+                         for k, v in observations.items()}
+            sampled_flat_2d = sampled_flat.reshape(B * num_samples, flat_dim)
+            sampled_qs = self.critic_forward(
+                observations=obs_tiled,
+                actions=sampled_flat_2d,
+                use_target=False,
+                observation_features=None if observation_features is None else None,
+                do_output_normalization=False,
+            )  # [E, B*N]
+
+            # Aggregate over critics
+            if self.config.calql.critic_agg == "min":
+                sampled_qs_agg = sampled_qs.min(dim=0)[0]
+            else:
+                sampled_qs_agg = sampled_qs.mean(dim=0)
+
+            # Reshape to [B, N]
+            sampled_qs_agg = sampled_qs_agg.view(B, num_samples)
+
+            # CalQL objective: temperature * logsumexp(Q/temperature) - Q_data
+            # Compute Q_data as ensemble-mean on dataset action
+            q_data = self.critic_forward(
+                observations=observations,
+                actions=flat_actions,
+                use_target=False,
+                observation_features=observation_features,
+                do_output_normalization=False,
+            ).mean(dim=0)  # [B]
+
+            # Only compute on valid entries (mask by actions_is_pad last flag)
+            q_data = q_data[valid_mask]
+            sampled_qs_valid = sampled_qs_agg[valid_mask]
+
+            lse = temperature * torch.logsumexp(sampled_qs_valid / max(1e-6, temperature), dim=1)
+            calql_loss = (lse - q_data).mean()
+
+            critics_loss = critics_loss + self.config.calql.weight * calql_loss
 
         info = {
-            # "critic_loss": critic_loss,
             "predicted_qs": torch.mean(q_preds),
             "target_qs": torch.mean(td_target_duplicate),
             "rewards": rewards.mean(),
             "actions_is_pad": torch.mean(actions_is_pad.float()),
         }
+        if getattr(self.config, "calql", None) and self.config.calql.enabled:
+            info.update({
+                "calql_loss": calql_loss.detach(),
+            })
 
         return critics_loss, info
 
@@ -1358,7 +1405,6 @@ class CriticEnsemble(nn.Module):
 #             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
 #         else:
 #             orthogonal_init()(self.output_layer.weight)
-#             # nn.init.zeros_(self.output_layer.bias)
 
 #     def forward(self, x: torch.Tensor) -> torch.Tensor:
 #         # device = get_device_from_parameters(self)
