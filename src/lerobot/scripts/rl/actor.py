@@ -639,8 +639,14 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
         # - Ensure discrete_critic gets correct encoder state (currently uses encoder_critic)
 
         # Load actor state dict
-        actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
-        policy.actor_onestep_flow.load_state_dict(actor_state_dict, strict=False)
+        # actor_state_dict = move_state_dict_to_device(state_dicts["policy"], device=device)
+        # policy.actor_onestep_flow.load_state_dict(actor_state_dict, strict=False)
+
+        # Load actor_onestep_flow if present
+        if hasattr(policy, "actor_onestep_flow") and "actor_onestep_flow" in state_dicts:
+            actor_onestep_flow_state_dict = move_state_dict_to_device(state_dicts["actor_onestep_flow"], device=device)
+            policy.actor_onestep_flow.load_state_dict(actor_onestep_flow_state_dict, strict=False)
+            logging.info("[ACTOR] Loaded actor_onestep_flow parameters from Learner.")
 
         # Load discrete critic if present
         if hasattr(policy, "discrete_critic") and "discrete_critic" in state_dicts:
@@ -658,11 +664,11 @@ def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, devi
             policy.discrete_actor.load_state_dict(discrete_actor_state_dict)
             logging.info("[ACTOR] Loaded discrete actor parameters from Learner.")
 
-        # Load actor_bc_flow if present
-        if hasattr(policy, "actor_bc_flow") and "actor_bc_flow" in state_dicts:
-            actor_bc_flow_state_dict = move_state_dict_to_device(state_dicts["actor_bc_flow"], device=device)
-            policy.actor_bc_flow.load_state_dict(actor_bc_flow_state_dict, strict=False)
-            logging.info("[ACTOR] Loaded actor_bc_flow parameters from Learner.")
+        # # Load actor_bc_flow if present
+        # if hasattr(policy, "actor_bc_flow") and "actor_bc_flow" in state_dicts:
+        #     actor_bc_flow_state_dict = move_state_dict_to_device(state_dicts["actor_bc_flow"], device=device)
+        #     policy.actor_bc_flow.load_state_dict(actor_bc_flow_state_dict, strict=False)
+        #     logging.info("[ACTOR] Loaded actor_bc_flow parameters from Learner.")
 
 
 #################################################
