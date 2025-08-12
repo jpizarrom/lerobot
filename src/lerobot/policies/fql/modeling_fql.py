@@ -430,6 +430,7 @@ class FQLPolicy(
             loss_discrete_onestep_flow, info = self.compute_loss_discrete_onestep_flow(
                 observations=observations,
                 observation_features=observation_features,
+                actions=actions,  # Pass actions for consistency
                 actions_is_pad=actions_is_pad,
             )
             return {"loss_discrete_onestep_flow": loss_discrete_onestep_flow, "info": info}
@@ -647,6 +648,32 @@ class FQLPolicy(
                 use_target=True,
                 observation_features=next_observation_features,
             )  # (num_critics, batch_size)
+
+            # Compute expected Q-value under the action distribution
+            # Method 1: Use the action probabilities directly as "soft" actions for critic
+            # This is more efficient than sampling multiple times
+            # next_actions_probs_flat = next_action_probs.view(
+            #     batch_size, -1
+            # )  # [batch_size, chunk_size * num_discrete_actions]
+
+            # # Compute next Q-values using action probabilities (expected Q-value)
+            # next_q_values = self.discrete_critic_forward(
+            #     observations=next_observations,
+            #     actions=next_actions_probs_flat,
+            #     use_target=True,
+            #     observation_features=next_observation_features,
+            # )  # (num_critics, batch_size)
+            
+            # Alternative approach: Could sample multiple times and average
+            # next_q_values_list = []
+            # num_samples = 5  # Could be configurable
+            # for _ in range(num_samples):
+            #     next_actions_sampled = Categorical(probs=next_action_probs).sample()
+            #     next_actions_one_hot = F.one_hot(next_actions_sampled, num_classes=self.config.num_discrete_actions).float()
+            #     next_actions_flat = next_actions_one_hot.view(batch_size, -1)
+            #     q_vals = self.discrete_critic_forward(next_observations, next_actions_flat, use_target=True, observation_features=next_observation_features)
+            #     next_q_values_list.append(q_vals)
+            # next_q_values = torch.stack(next_q_values_list).mean(dim=0)
 
             if self.config.num_subsample_critics is not None:
                 raise NotImplementedError(
@@ -879,7 +906,8 @@ class FQLPolicy(
         info = {
             "corruption_rate": (1 - t).mean(),
             "mask_rate": (xt == MASK_TOKEN).float().mean(),
-            "accuracy": (logits.argmax(dim=-1) == x1).float().mean(),
+            "accuracy": (logits.argmax(dim=-1) == x1).float().mean(),  # Accuracy on all positions
+            "accuracy_masked": ((logits.argmax(dim=-1) == x1) & (xt == MASK_TOKEN)).float().sum() / (xt == MASK_TOKEN).float().sum().clamp(min=1.0),  # Accuracy only on masked positions
         }
 
         return bc_flow_loss, info
@@ -888,6 +916,7 @@ class FQLPolicy(
         self,
         observations,
         observation_features: Tensor | None,
+        actions: Tensor | None,  # Added for consistency and potential validation
         actions_is_pad: Tensor | None,
     ) -> Tensor:
         """Compute discrete one-step flow loss with distillation and Q-learning using masking approach."""
@@ -896,7 +925,15 @@ class FQLPolicy(
         device = observations["observation.state"].device
         MASK_TOKEN = self.config.num_discrete_actions  # MASK token at index num_discrete_actions
 
+        # Optional validation if actions are provided
+        if actions is not None:
+            expected_shape = (batch_size, chunk_size, actions.shape[-1])
+            assert actions.shape == expected_shape, (
+                f"Expected actions shape {expected_shape}, got {actions.shape}"
+            )
+
         # Get target action distribution from BC flow (distillation target)
+        # NOTE: For efficiency, we could cache these computations if called frequently
         target_actions, target_log_probs, target_action_probs = self.compute_discrete_flow_actions(
             observations
         )
@@ -915,15 +952,23 @@ class FQLPolicy(
         # predicted_log_probs: [batch_size, chunk_size, num_discrete_actions]
         # predicted_action_probs: [batch_size, chunk_size, num_discrete_actions]
 
+        # Distillation loss: match one-step policy to BC flow target distribution
+        # Use MSE between action probabilities for stability
+        distill_loss = F.mse_loss(predicted_action_probs, target_action_probs)
+
         # Distillation loss: soft-target cross-entropy (preferred over MSE on probs)
         # KL(target || pred) up to a constant = CE(target, pred). Stop-grad on target.
-        soft_ce = -(target_action_probs.detach() * predicted_log_probs).sum(dim=-1)  # [batch_size, chunk_size]
-        if actions_is_pad is not None:
-            valid_mask = (~actions_is_pad).float()  # [batch_size, chunk_size]
-            distill_loss = (soft_ce * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
-        else:
-            distill_loss = soft_ce.mean()
+        # soft_ce = -(target_action_probs.detach() * predicted_log_probs).sum(dim=-1)  # [batch_size, chunk_size]
+        # if actions_is_pad is not None:
+        #     valid_mask = (~actions_is_pad).float()  # [batch_size, chunk_size]
+        #     distill_loss = (soft_ce * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
+        # else:
+        #     distill_loss = soft_ce.mean()
 
+        # Zero-out padded timesteps before passing to critic
+        if actions_is_pad is not None:
+            predicted_action_probs = predicted_action_probs * (~actions_is_pad).unsqueeze(-1).float()
+        
         # Q loss: maximize expected Q under the predicted discrete action distribution
         # Use straight-through Gumbel-Softmax for differentiable sampling
         tau = getattr(self.config, "gumbel_tau", 1.0)
@@ -946,6 +991,31 @@ class FQLPolicy(
             use_target=False,
             observation_features=observation_features,
         )
+
+        # Q loss: maximize expected Q under the predicted discrete action distribution
+        # Use soft action probabilities directly for more stable gradients and consistency with discrete critic
+        # predicted_actions_probs_flat = predicted_action_probs.view(
+        #     batch_size, -1
+        # )  # [batch_size, chunk_size * num_discrete_actions]
+
+        # q_preds = self.discrete_critic_forward(
+        #     observations=observations,
+        #     actions=predicted_actions_probs_flat,
+        #     use_target=False,
+        #     observation_features=observation_features,
+        # )
+        
+        # Alternative approach using Gumbel-Softmax (commented out for comparison)
+        # Use straight-through Gumbel-Softmax for differentiable sampling
+        # tau = getattr(self.config, "gumbel_tau", 1.0)
+        # predicted_actions_one_hot = F.gumbel_softmax(
+        #     predicted_logits, tau=tau, hard=True, dim=-1
+        # )  # [batch_size, chunk_size, num_discrete_actions]
+        # if actions_is_pad is not None:
+        #     predicted_actions_one_hot = predicted_actions_one_hot * (~actions_is_pad).unsqueeze(-1).float()
+        # actions_flat = predicted_actions_one_hot.view(batch_size, -1)
+        # q_preds = self.discrete_critic_forward(observations=observations, actions=actions_flat, ...)
+        
         # Aggregate critics (use mean similar to continuous onestep flow)
         min_q_preds = q_preds.mean(dim=0, keepdim=True)
         q_loss = -min_q_preds.mean()
