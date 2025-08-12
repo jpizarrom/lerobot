@@ -852,26 +852,29 @@ class FQLVLAPolicy(
         #     else SACObservationEncoder(self.config, self.normalize_inputs)
         # )
         if not self.config.no_bc_policy:
-            cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
-            # cfg_policy.n_obs_steps: int = 1
-            cfg_policy.chunk_size = self.config.chunk_size
-            cfg_policy.n_action_steps = self.config.chunk_size
-            # cfg_policy.train_state_proj = False
-            cfg_policy.max_action_dim = self.config.max_action_dim
-            cfg_policy.max_state_dim = self.config.max_state_dim
-            cfg_policy.num_vlm_layers = 2
-            cfg_policy.expert_width_multiplier = 0.5
-
-            # cfg_policy: Gemma3nVLAConfig = Gemma3nVLAConfig(
-            #     chunk_size=self.config.chunk_size,
-            #     n_action_steps=self.config.chunk_size,
-            #     max_action_dim=self.config.max_action_dim,
-            #     max_state_dim=self.config.max_state_dim,
-            #     num_vlm_layers=2,
-            #     expert_width_multiplier=0.5,
-            #     resize_imgs_with_padding=[256, 256],
-            #     load_vlm_weights=True,
-            # )
+            if self.config.bc_policy == "SmolVLA":
+                cfg_policy: SmolVLAConfig = PreTrainedConfig.from_pretrained("lerobot/smolvla_base")
+                # cfg_policy.n_obs_steps: int = 1
+                cfg_policy.chunk_size = self.config.chunk_size
+                cfg_policy.n_action_steps = self.config.chunk_size
+                # cfg_policy.train_state_proj = False
+                cfg_policy.max_action_dim = self.config.max_action_dim
+                cfg_policy.max_state_dim = self.config.max_state_dim
+                cfg_policy.num_vlm_layers = 2
+                cfg_policy.expert_width_multiplier = 0.5
+            elif self.config.bc_policy == "Gemma3nVLA":
+                cfg_policy: Gemma3nVLAConfig = Gemma3nVLAConfig(
+                    chunk_size=self.config.chunk_size,
+                    n_action_steps=self.config.chunk_size,
+                    max_action_dim=self.config.max_action_dim,
+                    max_state_dim=self.config.max_state_dim,
+                    num_vlm_layers=2,
+                    expert_width_multiplier=0.5,
+                    resize_imgs_with_padding=[256, 256],
+                    load_vlm_weights=True,
+                )
+            else:
+                raise ValueError(f"Unsupported BC policy: {self.config.bc_policy}")
 
             cfg_policy.normalization_mapping = {
                 "VISUAL": NormalizationMode.IDENTITY,
