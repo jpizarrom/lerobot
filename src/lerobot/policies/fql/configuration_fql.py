@@ -244,6 +244,7 @@ class FQLConfig(PreTrainedConfig):
     cql_autotune_alpha: bool = False
     # Initial value for CQL alpha Lagrange multiplier
     cql_alpha_lagrange_init: float = 1.0
+    cql_use_bc_for_sampling: bool = False
 
     # Network configuration
     # Configuration for the critic network architecture

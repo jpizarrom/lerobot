@@ -679,17 +679,23 @@ class FQLPolicy(
                     # Sample one policy action per batch element
                     with torch.no_grad():
                         current_noises = torch.randn(batch_size, action_dim, device=device)
-                        sampled_actions, _, _ = self.actor_onestep_flow(
-                            observations, observation_features, current_noises
-                        )
+                        if not self.config.cql_use_bc_for_sampling:
+                            sampled_actions, _, _ = self.actor_onestep_flow(
+                                observations, observation_features, current_noises
+                            )
+                        else:
+                            sampled_actions = self.compute_flow_actions(observations, current_noises)
                         sampled_actions = torch.clamp(sampled_actions, -1.0, 1.0)
                 elif action_type == "next":
                     # Sample one next action per batch element
                     with torch.no_grad():
                         next_noises = torch.randn(batch_size, action_dim, device=device)
-                        sampled_actions, _, _ = self.actor_onestep_flow(
-                            next_observations, next_observation_features, next_noises
-                        )
+                        if not self.config.cql_use_bc_for_sampling:
+                            sampled_actions, _, _ = self.actor_onestep_flow(
+                                next_observations, next_observation_features, next_noises
+                            )
+                        else:
+                            sampled_actions = self.compute_flow_actions(next_observations, next_noises)
                         sampled_actions = torch.clamp(sampled_actions, -1.0, 1.0)
                 else:
                     raise ValueError(f"Unknown action type: {action_type}")
