@@ -263,9 +263,10 @@ def act_with_policy(
     assert isinstance(policy, nn.Module)
 
     # get the initial policy parameters from the learner
-    update_policy_parameters(
-        policy=policy, parameters_queue=parameters_queue, device=device, wait_for_update=True
-    )
+    if cfg.policy.pretrain_steps > 0:
+        update_policy_parameters(
+            policy=policy, parameters_queue=parameters_queue, device=device, wait_for_update=True
+        )
 
     obs, info = online_env.reset()
 

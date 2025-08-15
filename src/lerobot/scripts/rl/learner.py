@@ -412,9 +412,15 @@ def add_actor_information_and_train(
                     f"[LEARNER] Pretraining finished, starting online training with {len(replay_buffer)} transitions"
                 )
                 offline_iterator = None  # Reset offline iterator after pretraining
-                policy._init_encoders()
-                policy._init_critics(cfg.policy.output_features["action"].shape[0])
-                policy.to(cfg.policy.device)
+                if cfg.policy.reset_critics_after_pretraining:
+                    logging.info("[LEARNER] Resetting critics after pretraining")
+                    policy._init_encoders()
+                    policy._init_critics(cfg.policy.output_features["action"].shape[0])
+                    policy.to(cfg.policy.device)
+
+                    optimizers["critic"] = torch.optim.Adam(
+                        params=policy.critic_ensemble.parameters(), lr=cfg.policy.critic_lr
+                    )
 
             if online_iterator is None and not cfg.offline_learning_only:
                 online_iterator = replay_buffer.get_iterator(
@@ -752,8 +758,8 @@ def add_actor_information_and_train(
                 interaction_message=interaction_message,
                 policy=policy,
                 optimizers=optimizers,
-                replay_buffer=replay_buffer,
-                offline_replay_buffer=offline_replay_buffer,
+                replay_buffer=replay_buffer if optimization_step > pretrain_steps else None,
+                offline_replay_buffer=offline_replay_buffer if optimization_step > pretrain_steps else None,
                 dataset_repo_id=dataset_repo_id,
                 fps=fps,
             )
@@ -836,7 +842,7 @@ def save_training_checkpoint(
     interaction_message: dict | None,
     policy: nn.Module,
     optimizers: dict[str, Optimizer],
-    replay_buffer: ReplayBuffer,
+    replay_buffer: ReplayBuffer | None = None,
     offline_replay_buffer: ReplayBuffer | None = None,
     dataset_repo_id: str | None = None,
     fps: int = 30,
@@ -899,8 +905,10 @@ def save_training_checkpoint(
     # Save dataset
     # NOTE: Handle the case where the dataset repo id is not specified in the config
     # eg. RL training without demonstrations data
-    repo_id_buffer_save = cfg.env.task if dataset_repo_id is None else dataset_repo_id
-    replay_buffer.to_lerobot_dataset(repo_id=repo_id_buffer_save, fps=fps, root=dataset_dir)
+
+    if replay_buffer is not None:
+        repo_id_buffer_save = cfg.env.task if dataset_repo_id is None else dataset_repo_id
+        replay_buffer.to_lerobot_dataset(repo_id=repo_id_buffer_save, fps=fps, root=dataset_dir)
 
     if offline_replay_buffer is not None:
         dataset_offline_dir = os.path.join(cfg.output_dir, "dataset_offline")
