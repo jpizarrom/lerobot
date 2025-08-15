@@ -65,6 +65,7 @@ class FQLPolicy(
         continuous_action_dim = config.output_features["action"].shape[0]
         self._init_normalization(dataset_stats)
         self._init_encoders()
+        self._init_encoders_actor()
         self._init_critics(continuous_action_dim)
         self._init_actor_bc_flow(continuous_action_dim)
         self._init_actor_onestep_flow(continuous_action_dim)
@@ -863,11 +864,13 @@ class FQLPolicy(
         """Initialize shared or separate encoders for actor and critic."""
         self.shared_encoder = self.config.shared_encoder
         self.encoder_critic = SACObservationEncoder(self.config, self.normalize_inputs)
-        self.encoder_discrete_critic = (
-            self.encoder_critic
-            if self.shared_encoder
-            else SACObservationEncoder(self.config, self.normalize_inputs)
-        )
+        # self.encoder_discrete_critic = (
+        #     self.encoder_critic
+        #     if self.shared_encoder
+        #     else SACObservationEncoder(self.config, self.normalize_inputs)
+        # )
+
+    def _init_encoders_actor(self):
         self.encoder_actor_bc_flow = (
             self.encoder_critic
             if self.shared_encoder

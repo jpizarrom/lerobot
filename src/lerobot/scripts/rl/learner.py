@@ -324,7 +324,8 @@ def add_actor_information_and_train(
 
     policy.train()
 
-    push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
+    if cfg.policy.pretrain_steps == 0:
+        push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
 
     last_time_policy_pushed = time.time()
 
@@ -360,6 +361,8 @@ def add_actor_information_and_train(
     online_iterator = None
     offline_iterator = None
 
+    pretrain_steps = cfg.policy.pretrain_steps
+
     # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
     while True:
         # Exit the training loop if shutdown is requested
@@ -367,54 +370,81 @@ def add_actor_information_and_train(
             logging.info("[LEARNER] Shutdown signal received. Exiting...")
             break
 
-        # Process all available transitions to the replay buffer, send by the actor server
-        process_transitions(
-            transition_queue=transition_queue,
-            replay_buffer=replay_buffer,
-            offline_replay_buffer=offline_replay_buffer,
-            device=device,
-            dataset_repo_id=dataset_repo_id,
-            shutdown_event=shutdown_event,
-            # chunk_size=cfg.policy.chunk_size,
-        )
-
-        # Process all available interaction messages sent by the actor server
-        interaction_message = process_interaction_messages(
-            interaction_message_queue=interaction_message_queue,
-            interaction_step_shift=interaction_step_shift,
-            wandb_logger=wandb_logger,
-            shutdown_event=shutdown_event,
-        )
-
-        # Wait until the replay buffer has enough samples to start training
-        if len(replay_buffer) < online_step_before_learning and not cfg.offline_learning_only:
-            continue
-
-        if online_iterator is None:
-            online_iterator = replay_buffer.get_iterator(
-                batch_size=batch_size,
-                async_prefetch=async_prefetch,
-                queue_size=2,
-                n_steps=cfg.policy.chunk_size,
-                gamma=cfg.policy.discount,
+        if optimization_step < pretrain_steps:
+            if offline_replay_buffer is not None and offline_iterator is None:
+                logging.info(
+                    f"[LEARNER] Pretraining step {optimization_step}/{pretrain_steps}, "
+                    "sampling from offline replay buffer"
+                )
+                offline_iterator = offline_replay_buffer.get_iterator(
+                    batch_size=batch_size * 2,  # Use larger batch size for pretraining
+                    async_prefetch=async_prefetch,
+                    queue_size=2,
+                    n_steps=cfg.policy.chunk_size,
+                    gamma=cfg.policy.discount,
+                )
+        else:
+            # Process all available transitions to the replay buffer, send by the actor server
+            process_transitions(
+                transition_queue=transition_queue,
+                replay_buffer=replay_buffer,
+                offline_replay_buffer=offline_replay_buffer,
+                device=device,
+                dataset_repo_id=dataset_repo_id,
+                shutdown_event=shutdown_event,
+                # chunk_size=cfg.policy.chunk_size,
             )
 
-        if offline_replay_buffer is not None and offline_iterator is None:
-            offline_iterator = offline_replay_buffer.get_iterator(
-                batch_size=batch_size,
-                async_prefetch=async_prefetch,
-                queue_size=2,
-                n_steps=cfg.policy.chunk_size,
-                gamma=cfg.policy.discount,
+            # Process all available interaction messages sent by the actor server
+            interaction_message = process_interaction_messages(
+                interaction_message_queue=interaction_message_queue,
+                interaction_step_shift=interaction_step_shift,
+                wandb_logger=wandb_logger,
+                shutdown_event=shutdown_event,
             )
+
+            # Wait until the replay buffer has enough samples to start training
+            if len(replay_buffer) < online_step_before_learning and not cfg.offline_learning_only:
+                continue
+
+            if optimization_step == pretrain_steps:
+                logging.info(
+                    f"[LEARNER] Pretraining finished, starting online training with {len(replay_buffer)} transitions"
+                )
+                offline_iterator = None  # Reset offline iterator after pretraining
+                policy._init_encoders()
+                policy._init_critics(cfg.policy.output_features["action"].shape[0])
+                policy.to(cfg.policy.device)
+
+            if online_iterator is None and not cfg.offline_learning_only:
+                online_iterator = replay_buffer.get_iterator(
+                    batch_size=batch_size if not cfg.online_learning_only else batch_size * 2,
+                    async_prefetch=async_prefetch,
+                    queue_size=2,
+                    n_steps=cfg.policy.chunk_size,
+                    gamma=cfg.policy.discount,
+                )
+
+            if (
+                offline_replay_buffer is not None
+                and offline_iterator is None
+                and not cfg.online_learning_only
+            ):
+                offline_iterator = offline_replay_buffer.get_iterator(
+                    batch_size=batch_size,
+                    async_prefetch=async_prefetch,
+                    queue_size=2,
+                    n_steps=cfg.policy.chunk_size,
+                    gamma=cfg.policy.discount,
+                )
 
         time_for_one_optimization_step = time.time()
         for _ in range(utd_ratio - 1):
             # Sample from the iterators
-            if not cfg.offline_learning_only:
+            if not cfg.offline_learning_only and optimization_step >= pretrain_steps:
                 batch = next(online_iterator)
 
-                if dataset_repo_id is not None:
+                if dataset_repo_id is not None and not cfg.online_learning_only:
                     batch_offline = next(offline_iterator)
                     # batch_offline["action_is_pad"]
                     # batch = batch_offline
@@ -496,11 +526,11 @@ def add_actor_information_and_train(
             # Update target networks (main and discrete)
             policy.update_target_networks()
 
-        if not cfg.offline_learning_only:
+        if not cfg.offline_learning_only and optimization_step >= pretrain_steps:
             # Sample for the last update in the UTD ratio
             batch = next(online_iterator)
 
-            if dataset_repo_id is not None:
+            if dataset_repo_id is not None and not cfg.online_learning_only:
                 batch_offline = next(offline_iterator)
                 # batch_offline["action"]
                 # batch = batch_offline
@@ -671,7 +701,10 @@ def add_actor_information_and_train(
                 # policy.update_temperature()
 
         # Push policy to actors if needed
-        if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
+        if (
+            time.time() - last_time_policy_pushed > policy_parameters_push_frequency
+            and optimization_step + 1 >= pretrain_steps
+        ):
             push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
             last_time_policy_pushed = time.time()
 

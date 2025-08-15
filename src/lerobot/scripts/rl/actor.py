@@ -262,6 +262,11 @@ def act_with_policy(
     policy = policy.eval()
     assert isinstance(policy, nn.Module)
 
+    # get the initial policy parameters from the learner
+    update_policy_parameters(
+        policy=policy, parameters_queue=parameters_queue, device=device, wait_for_update=True
+    )
+
     obs, info = online_env.reset()
 
     # NOTE: For the moment we will solely handle the case of a single environment
@@ -622,8 +627,16 @@ def interactions_stream(
 #################################################
 
 
-def update_policy_parameters(policy: FQLVLAPolicy, parameters_queue: Queue, device):
+def update_policy_parameters(
+    policy: FQLVLAPolicy, parameters_queue: Queue, device, wait_for_update: bool = False
+):
     bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
+
+    while bytes_state_dict is None and wait_for_update:
+        # logging.info("[ACTOR] Waiting for updated policy parameters from Learner...")
+        bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
+        time.sleep(2)
+
     if bytes_state_dict is not None:
         logging.info("[ACTOR] Load new parameters from Learner.")
         state_dicts = bytes_to_state_dict(bytes_state_dict)

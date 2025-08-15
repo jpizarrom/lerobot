@@ -163,6 +163,8 @@ class FQLConfig(PreTrainedConfig):
     # Training parameter
     # Number of steps for online training
     online_steps: int = 1000000
+    # Number of steps for pretraining (if applicable)
+    pretrain_steps: int = 0
     # Seed for the online environment
     online_env_seed: int = 10000
     # Capacity of the online replay buffer
