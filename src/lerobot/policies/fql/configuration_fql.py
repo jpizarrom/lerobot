@@ -214,6 +214,37 @@ class FQLConfig(PreTrainedConfig):
     # Gradient clipping norm for the SAC algorithm
     grad_clip_norm: float = 40.0
 
+    # Cal-QL parameters
+    # Whether to use Cal-QL (Calibrated Q-Learning)
+    use_calql: bool = False
+    # Whether to apply Cal-QL bounds to random actions (if False, only applies to policy actions)
+    calql_bound_random_actions: bool = False
+    # Number of actions to sample for CQL/Cal-QL
+    cql_n_actions: int = 10
+    # CQL temperature parameter
+    cql_temp: float = 1.0
+    # CQL alpha weight for the CQL loss
+    cql_alpha: float = 5.0
+    # Whether to use CQL loss
+    use_cql_loss: bool = False
+    # Whether to use TD loss (can be disabled for pure CQL)
+    use_td_loss: bool = True
+    # CQL action sampling method: "uniform" or "normal"
+    cql_action_sample_method: str = "uniform"
+    # Whether to use importance sampling in CQL
+    cql_importance_sample: bool = False
+    # Whether to use max target backup in CQL
+    cql_max_target_backup: bool = False
+    # CQL clipping bounds for the Q-value difference
+    cql_clip_diff_min: float = -float("inf")
+    cql_clip_diff_max: float = float("inf")
+    # CQL target action gap for auto-tuning
+    cql_target_action_gap: float = 1.0
+    # Whether to auto-tune CQL alpha
+    cql_autotune_alpha: bool = False
+    # Initial value for CQL alpha Lagrange multiplier
+    cql_alpha_lagrange_init: float = 1.0
+
     # Network configuration
     # Configuration for the critic network architecture
     critic_network_kwargs: CriticNetworkConfig = field(default_factory=CriticNetworkConfig)
@@ -242,13 +273,20 @@ class FQLConfig(PreTrainedConfig):
         # Any validation specific to SAC configuration
 
     def get_optimizer_preset(self) -> MultiAdamConfig:
+        optimizer_groups = {
+            "actor_bc_flow": {"lr": self.actor_lr},
+            "actor_onestep_flow": {"lr": self.actor_lr},
+            "critic": {"lr": self.critic_lr},
+            "temperature": {"lr": self.temperature_lr},
+        }
+
+        # Add CQL alpha optimizer if auto-tuning is enabled
+        if self.cql_autotune_alpha:
+            optimizer_groups["cql_alpha_lagrange"] = {"lr": self.critic_lr}  # Use same lr as critic
+
         return MultiAdamConfig(
             weight_decay=0.0,
-            optimizer_groups={
-                "actor": {"lr": self.actor_lr},
-                "critic": {"lr": self.critic_lr},
-                "temperature": {"lr": self.temperature_lr},
-            },
+            optimizer_groups=optimizer_groups,
         )
 
     def get_scheduler_preset(self) -> None:

@@ -85,11 +85,16 @@ class FQLPolicy(
                 if not n.startswith("encoder") or not self.shared_encoder
             ],
             "critic": self.critic_ensemble.parameters(),
-            # "temperature": self.log_alpha,
+            "temperature": [self.log_alpha],
         }
+
+        # Add CQL alpha optimizer parameters if auto-tuning is enabled
+        if hasattr(self, "cql_log_alpha") and self.config.cql_autotune_alpha:
+            optim_params["cql_alpha_lagrange"] = [self.cql_log_alpha]
+
         if self.config.num_discrete_actions is not None:
             optim_params["discrete_critic"] = self.discrete_critic.parameters()
-        raise ValueError("Not used")
+
         return optim_params
 
     def reset(self):
@@ -241,6 +246,7 @@ class FQLPolicy(
             next_observations: dict[str, Tensor] = batch["next_state_nsteps"]
             done: Tensor = batch["done_nsteps"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
+            mc_returns = batch["mc_returns"]
 
             loss_critic, info = self.compute_loss_critic(
                 observations=observations,
@@ -252,6 +258,7 @@ class FQLPolicy(
                 done=done,
                 observation_features=observation_features,
                 next_observation_features=next_observation_features,
+                mc_returns=mc_returns,
             )
 
             return {"loss_critic": loss_critic, "info": info}
@@ -309,13 +316,21 @@ class FQLPolicy(
         #     )
         #     return {"loss_discrete_actor": loss_discrete_actor, "info": info}
 
-        if model == "temperature":
-            return {
-                "loss_temperature": self.compute_loss_temperature(
-                    observations=observations,
-                    observation_features=observation_features,
-                )
-            }
+        # if model == "temperature":
+        #     return {
+        #         "loss_temperature": self.compute_loss_temperature(
+        #             observations=observations,
+        #             observation_features=observation_features,
+        #         )
+        #     }
+
+        # if model == "cql_alpha_lagrange" and self.config.cql_autotune_alpha:
+        #     loss_cql_alpha, info = self.compute_loss_cql_alpha(
+        #         observations=observations,
+        #         actions=actions,
+        #         observation_features=observation_features,
+        #     )
+        #     return {"loss_cql_alpha_lagrange": loss_cql_alpha, "info": info}
 
         raise ValueError(f"Unknown model type: {model}")
 
@@ -344,6 +359,53 @@ class FQLPolicy(
     def update_temperature(self):
         self.temperature = self.log_alpha.exp().item()
 
+        # Update CQL alpha if auto-tuning is enabled
+        if self.config.cql_autotune_alpha and hasattr(self, "cql_log_alpha"):
+            self.cql_alpha = self.cql_log_alpha.exp().item()
+
+    # def compute_loss_cql_alpha(
+    #     self,
+    #     observations: dict[str, Tensor],
+    #     actions: Tensor,
+    #     observation_features: Tensor | None = None,
+    # ) -> tuple[Tensor, dict]:
+    #     """Compute CQL alpha Lagrange multiplier loss for auto-tuning."""
+    #     if not self.config.cql_autotune_alpha:
+    #         raise ValueError("CQL alpha auto-tuning is not enabled")
+
+    #     batch_size = observations["observation.state"].shape[0]
+    #     actions_for_cql = actions[:, :, :].reshape(actions.shape[0], -1)
+
+    #     # Recompute CQL Q-difference without gradients for the constraint
+    #     with torch.no_grad():
+    #         cql_q_diff, _ = self._get_cql_q_diff(
+    #             observations, actions_for_cql, batch_size, observation_features
+    #         )
+
+    #     # Compute Lagrange multiplier loss: alpha * (constraint - target)
+    #     # where constraint is (Q_sampled - Q_data) and target is cql_target_action_gap
+    #     constraint_violation = cql_q_diff.mean() - self.config.cql_target_action_gap
+    #     cql_alpha_loss = -self.cql_log_alpha.exp() * constraint_violation
+
+    #     info = {
+    #         "cql_alpha_loss": cql_alpha_loss,
+    #         "cql_alpha_lagrange_multiplier": self.cql_log_alpha.exp(),
+    #         "cql_constraint_violation": constraint_violation,
+    #     }
+
+    #     return cql_alpha_loss, info
+
+    # def compute_loss_temperature(
+    #     self,
+    #     observations: dict[str, Tensor],
+    #     observation_features: Tensor | None = None,
+    # ) -> Tensor:
+    #     """Compute temperature loss for automatic temperature tuning."""
+    #     # For temperature loss, we would typically need action log probabilities
+    #     # Since FQL doesn't use explicit probabilistic actions, we can return a dummy loss
+    #     # or implement a proper temperature tuning scheme if needed
+    #     return torch.tensor(0.0, device=observations["observation.state"].device)
+
     def compute_loss_critic(
         self,
         observations,
@@ -355,6 +417,7 @@ class FQLPolicy(
         done,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
+        mc_returns: Tensor | None = None,
     ) -> Tensor:
         actions = self.normalize_targets({"action": actions})["action"]
 
@@ -429,20 +492,80 @@ class FQLPolicy(
         q_preds = q_preds[:, ~actions_is_pad[:, -1]]
         td_target_duplicate = td_target_duplicate[:, ~actions_is_pad[:, -1]]
 
-        critics_loss = (
-            F.mse_loss(
-                input=q_preds,
-                target=td_target_duplicate,
-                reduction="none",
-            ).mean(dim=1)
-        ).sum()
+        # TD loss
+        if self.config.use_td_loss:
+            td_loss = (
+                F.mse_loss(
+                    input=q_preds,
+                    target=td_target_duplicate,
+                    reduction="none",
+                ).mean(dim=1)
+            ).sum()
+        else:
+            td_loss = torch.tensor(0.0, device=q_preds.device)
+
+        # CQL/Cal-QL loss
+        cql_loss = torch.tensor(0.0, device=q_preds.device)
+        cql_info = {}
+        if self.config.use_cql_loss:
+            # Need to use the original actions and observations for CQL computation
+            batch_size = observations["observation.state"].shape[0]
+
+            # Compute Monte Carlo returns for Cal-QL bounds
+            if self.config.use_calql:
+                cql_q_diff, cql_intermediate_results = self._get_cql_q_diff(
+                    observations,
+                    actions,
+                    batch_size,
+                    next_observations,
+                    mc_returns,
+                    observation_features,
+                    next_observation_features,
+                )
+            else:
+                cql_q_diff, cql_intermediate_results = self._get_cql_q_diff(
+                    observations,
+                    actions,
+                    batch_size,
+                    next_observations,
+                    None,
+                    observation_features,
+                    next_observation_features,
+                )
+
+            # Apply masking to CQL diff as well
+            cql_q_diff = cql_q_diff[:, ~actions_is_pad[:, -1]]
+
+            if self.config.cql_autotune_alpha:
+                # If auto-tuning, compute loss differently (this would require implementing Lagrange multiplier)
+                cql_loss = (cql_q_diff - self.config.cql_target_action_gap).mean()
+                alpha = self.config.cql_alpha  # For now, use fixed alpha
+            else:
+                alpha = self.config.cql_alpha
+                cql_loss = torch.clamp(
+                    cql_q_diff,
+                    self.config.cql_clip_diff_min,
+                    self.config.cql_clip_diff_max,
+                ).mean()
+
+            cql_info = {
+                "cql_loss": cql_loss,
+                "cql_alpha": torch.tensor(alpha, device=cql_q_diff.device),
+                "cql_diff": cql_q_diff.mean(),
+                **cql_intermediate_results,
+            }
+
+        # Total critic loss
+        critics_loss = td_loss + (self.config.cql_alpha * cql_loss if self.config.use_cql_loss else 0)
 
         info = {
             "critic_loss": critics_loss,
+            "td_loss": td_loss,
             "predicted_qs": torch.mean(q_preds),
             "target_qs": torch.mean(td_target_duplicate),
             "rewards": rewards.mean(),
             "actions_is_pad": torch.mean(actions_is_pad.float()),
+            **cql_info,
             # "discrete_critic_loss": discrete_critic_loss,
             # "discrete_predicted_qs": torch.mean(predicted_discrete_qs),
             # "discrete_target_qs": torch.mean(target_discrete_q_duplicate),
@@ -532,6 +655,139 @@ class FQLPolicy(
         }
 
         return actor_onestep_flow_loss, info
+
+    def _get_cql_q_diff(
+        self,
+        observations: dict[str, Tensor],
+        actions: Tensor,
+        batch_size: int,
+        next_observations: dict[str, Tensor],
+        mc_returns: Tensor | None = None,
+        observation_features: Tensor | None = None,
+        next_observation_features: Tensor | None = None,
+    ) -> tuple[Tensor, dict]:
+        """Compute CQL Q-value difference for Cal-QL implementation.
+
+        This method implements the core CQL logic, sampling random actions and computing
+        the difference between Q-values of sampled actions and dataset actions.
+        """
+        action_dim = self.actor_onestep_flow.action_dim
+        device = observations["observation.state"].device
+
+        # Sample random actions and policy actions iteratively to save memory
+        all_q_values_list = []
+        total_bound_violations = 0
+        total_samples = 0
+
+        # Process random actions and policy actions iteratively
+        for action_type in ["random", "current", "next"]:
+            for _ in range(self.config.cql_n_actions):
+                if action_type == "random":
+                    # Sample one random action per batch element
+                    if self.config.cql_action_sample_method == "uniform":
+                        sampled_actions = torch.rand(batch_size, action_dim, device=device) * 2.0 - 1.0
+                    elif self.config.cql_action_sample_method == "normal":
+                        sampled_actions = torch.randn(batch_size, action_dim, device=device)
+                    else:
+                        raise NotImplementedError(
+                            f"CQL action sample method {self.config.cql_action_sample_method} not supported"
+                        )
+                elif action_type == "current":
+                    # Sample one policy action per batch element
+                    with torch.no_grad():
+                        current_noises = torch.randn(batch_size, action_dim, device=device)
+                        sampled_actions, _, _ = self.actor_onestep_flow(
+                            observations, observation_features, current_noises
+                        )
+                        sampled_actions = torch.clamp(sampled_actions, -1.0, 1.0)
+                elif action_type == "next":
+                    # Sample one next action per batch element
+                    with torch.no_grad():
+                        next_noises = torch.randn(batch_size, action_dim, device=device)
+                        sampled_actions, _, _ = self.actor_onestep_flow(
+                            next_observations, next_observation_features, next_noises
+                        )
+                        sampled_actions = torch.clamp(sampled_actions, -1.0, 1.0)
+                else:
+                    raise ValueError(f"Unknown action type: {action_type}")
+
+                # Get Q-values for this batch of sampled actions
+                q_values = self.critic_forward(
+                    observations=observations,
+                    actions=sampled_actions,
+                    use_target=False,
+                    observation_features=observation_features,
+                    do_output_normalization=False,
+                )  # Shape: (num_critics, batch_size)
+
+                # Apply Cal-QL bounds if enabled
+                if self.config.use_calql and mc_returns is not None:
+                    # Only apply bounds to policy actions if calql_bound_random_actions is False
+                    if action_type in ["current", "next"] or self.config.calql_bound_random_actions:
+                        mc_lower_bound = mc_returns.squeeze(-1).unsqueeze(0).repeat(q_values.shape[0], 1)
+
+                        # Track bound violations for logging
+                        bound_violations = (q_values < mc_lower_bound).float().sum()
+                        total_bound_violations += bound_violations
+                        total_samples += q_values.numel()
+
+                        # Apply the bounds
+                        q_values = torch.maximum(q_values, mc_lower_bound)
+
+                # Store Q-values for later log-sum-exp computation
+                all_q_values_list.append(q_values.unsqueeze(-1))  # Shape: (num_critics, batch_size, 1)
+
+        # Get Q-values for dataset actions
+        q_pred = self.critic_forward(
+            observations=observations,
+            actions=actions,
+            use_target=False,
+            observation_features=observation_features,
+            do_output_normalization=False,
+        )  # Shape: (num_critics, batch_size)
+
+        # Concatenate all Q-values for log-sum-exp computation
+        if not self.config.cql_importance_sample:
+            # Standard CQL: add dataset Q-values to the logsumexp
+            all_q_values_list.append(q_pred.unsqueeze(-1))
+            all_q_values = torch.cat(
+                all_q_values_list, dim=-1
+            )  # Shape: (num_critics, batch_size, 3 * cql_n_actions + 1)
+
+            # Subtract log normalizing constant
+            all_q_values -= (
+                torch.log(torch.tensor(all_q_values.shape[-1], dtype=torch.float32, device=device))
+                * self.config.cql_temp
+            )
+            assert all_q_values.shape == (
+                self.config.num_critics,
+                batch_size,
+                3 * self.config.cql_n_actions + 1,
+            )
+        else:
+            all_q_values = torch.cat(
+                all_q_values_list, dim=-1
+            )  # Shape: (num_critics, batch_size, 3 * cql_n_actions)
+            assert all_q_values.shape == (self.config.num_critics, batch_size, 3 * self.config.cql_n_actions)
+
+        # Compute log-sum-exp
+        cql_ood_values = torch.logsumexp(all_q_values / self.config.cql_temp, dim=-1) * self.config.cql_temp
+
+        # Compute the difference
+        cql_q_diff = cql_ood_values - q_pred
+
+        # Prepare info dictionary
+        info = {
+            "cql_ood_values": cql_ood_values.mean(),
+            "cql_q_diff": cql_q_diff.mean(),
+        }
+
+        # Add Cal-QL bound rate if applicable
+        if self.config.use_calql and mc_returns is not None and total_samples > 0:
+            calql_bound_rate = total_bound_violations / total_samples
+            info["calql_bound_rate"] = calql_bound_rate
+
+        return cql_q_diff, info
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
@@ -656,6 +912,14 @@ class FQLPolicy(
         temp_init = self.config.temperature_init
         self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)]))
         self.temperature = self.log_alpha.exp().item()
+
+        # Initialize CQL alpha parameter if auto-tuning is enabled
+        if self.config.cql_autotune_alpha:
+            cql_alpha_init = self.config.cql_alpha_lagrange_init
+            self.cql_log_alpha = nn.Parameter(torch.tensor([math.log(cql_alpha_init)]))
+            self.cql_alpha = self.cql_log_alpha.exp().item()
+        else:
+            self.cql_alpha = self.config.cql_alpha
 
 
 class SACObservationEncoder(nn.Module):

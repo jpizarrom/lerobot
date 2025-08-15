@@ -44,6 +44,7 @@ class BatchTransition(TypedDict):
     done_nsteps: torch.Tensor
     truncated_nsteps: torch.Tensor
     discount_nsteps: torch.Tensor | None = None
+    mc_returns: torch.Tensor | None = None
 
 
 def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Tensor:
@@ -324,6 +325,36 @@ class ReplayBuffer:
         discounted_rewards = rewards_seq * discounts * mask
         n_step_returns = discounted_rewards.sum(axis=1, keepdims=True)  # [batch, 1]
 
+        # compute Monte Carlo returns for episodes within the specified horizon
+        max_episode_length = 100  # TODO: make this configurable
+        max_episode_steps = torch.arange(max_episode_length, device=self.storage_device).reshape(1, -1)
+        indices_for_mc = (
+            idx[:, None] + max_episode_steps
+        ) % self.capacity  # shape: [batch, max_episode_length]
+        # Compute Monte Carlo returns for the sampled indices
+        rewards_seq_for_mc = self.rewards[indices_for_mc]  # [batch, max_episode_length]
+        dones_seq_for_mc = self.dones[indices_for_mc]  # [batch, max_episode_length]
+        truncated_seq_for_mc = self.truncateds[indices_for_mc]  # [batch, max_episode_length]
+
+        # Compute masks for Monte Carlo returns
+        done_or_truncated_for_mc = torch.logical_or(dones_seq_for_mc, truncated_seq_for_mc)
+        done_idx_for_mc = done_or_truncated_for_mc.int().argmax(axis=1)
+        # If no done/truncation, keep full sequence
+        # TODO: remove this or add assert as it is expected to be less than max_episode_length
+        has_done_or_truncated_for_mc = done_or_truncated_for_mc.any(axis=1)
+        done_idx_for_mc = torch.where(has_done_or_truncated_for_mc, done_idx_for_mc, max_episode_length - 1)
+
+        mask_for_mc = (
+            torch.arange(max_episode_length, device=self.storage_device).reshape(1, -1)
+            <= done_idx_for_mc[:, None]
+        )  # shape: [batch, max_episode_length]
+        # Compute Monte Carlo returns
+        discounts_for_mc = gamma ** torch.arange(
+            max_episode_length, dtype=torch.float32, device=self.storage_device
+        )  # .reshape(1, -1)  # [1, max_episode_length]
+        discounted_rewards_for_mc = rewards_seq_for_mc * discounts_for_mc * mask_for_mc
+        mc_returns = discounted_rewards_for_mc.sum(axis=1, keepdims=True)  # [batch, 1]
+
         # Compute indices of next_obs/done at the final point of the n-step transition
         last_indices = (idx + done_idx) % self.capacity
         # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
@@ -337,6 +368,7 @@ class ReplayBuffer:
         # batch_dones_nsteps = torch.logical_or(self.dones[last_indices], self.truncateds[last_indices]).to(self.device).float()
         # batch_dones_nsteps = next_dones * (1.0 - next_truncateds)
         batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
+        batch_mc_returns = mc_returns.to(self.device)
 
         # batch_actions [batch, n_steps, ...] copy actions until done_idx, then copy last action
         batch_actions = self.actions[indices]  # [batch, n_steps, ...]
@@ -466,6 +498,7 @@ class ReplayBuffer:
             done_nsteps=batch_dones_nsteps,
             truncated_nsteps=batch_truncateds_nsteps,
             discount_nsteps=batch_discounts_nsteps,
+            mc_returns=batch_mc_returns,
         )
 
     def get_iterator(
@@ -1031,6 +1064,10 @@ def concatenate_batch_transitions(
 
     left_batch_transitions["discount_nsteps"] = torch.cat(
         [left_batch_transitions["discount_nsteps"], right_batch_transition["discount_nsteps"]], dim=0
+    )
+
+    left_batch_transitions["mc_returns"] = torch.cat(
+        [left_batch_transitions["mc_returns"], right_batch_transition["mc_returns"]], dim=0
     )
 
     # Handle complementary_info
