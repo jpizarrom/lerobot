@@ -422,25 +422,11 @@ class FQLPolicy(
         actions = self.normalize_targets({"action": actions})["action"]
 
         with torch.no_grad():
-            batch_shape = next_observations["observation.state"].shape[0]
-            action_dim = self.actor_onestep_flow.action_dim  # self.config['action_dim']
+            # Compute next actions (similar to JAX _compute_next_actions)
+            _, next_qs = self._compute_next_actions(next_observations, next_observation_features)
 
-            noises = torch.randn(
-                batch_shape, action_dim, device=next_observations["observation.state"].device
-            )
-            next_actions, _, _ = self.actor_onestep_flow(next_observations, next_observation_features, noises)
-            # next_actions = self.select_action(next_observations)
-
-            next_actions = torch.clamp(next_actions, -1.0, 1.0)
-
-            # 2- compute q targets
-            next_qs = self.critic_forward(
-                observations=next_observations,
-                actions=next_actions,
-                use_target=True,
-                observation_features=next_observation_features,
-                do_output_normalization=False,
-            )  # (critic_ensemble_size, batch_size)
+            # Process target Q-values (similar to JAX _process_target_next_qs)
+            next_qs = self._process_target_next_qs(next_qs)
 
             # subsample critics to prevent overfitting if use high UTD (update to date)
             # TODO: Get indices before forward pass to avoid unnecessary computation
@@ -449,11 +435,8 @@ class FQLPolicy(
                     "Subsampling critics is not implemented yet. "
                     "Please set num_subsample_critics to None or implement the subsampling logic."
                 )
-                # indices = torch.randperm(self.config.num_critics)
-                # indices = indices[: self.config.num_subsample_critics]
-                # next_qs = next_qs[indices]
 
-            # critics subsample size
+            # critics ensemble aggregation (min or mean)
             if self.config.q_agg == "min":
                 next_q, _ = next_qs.min(dim=0)  # Get values from min operation
             else:
@@ -765,10 +748,10 @@ class FQLPolicy(
                 3 * self.config.cql_n_actions + 1,
             )
         else:
-            all_q_values = torch.cat(
-                all_q_values_list, dim=-1
-            )  # Shape: (num_critics, batch_size, 3 * cql_n_actions)
-            assert all_q_values.shape == (self.config.num_critics, batch_size, 3 * self.config.cql_n_actions)
+            raise NotImplementedError(
+                "CQL importance sampling is not implemented yet. "
+                "Please set cql_importance_sample to False or implement the importance sampling logic."
+            )
 
         # Compute log-sum-exp
         cql_ood_values = torch.logsumexp(all_q_values / self.config.cql_temp, dim=-1) * self.config.cql_temp
@@ -788,6 +771,70 @@ class FQLPolicy(
             info["calql_bound_rate"] = calql_bound_rate
 
         return cql_q_diff, info
+
+    def _compute_next_actions(
+        self, next_observations: dict[str, Tensor], next_observation_features: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        """Compute next actions for target Q-value calculation.
+
+        Similar to JAX _compute_next_actions but adapted for flow-based policies.
+        """
+        batch_size = next_observations["observation.state"].shape[0]
+        action_dim = self.actor_onestep_flow.action_dim
+        device = next_observations["observation.state"].device
+
+        # Determine how many actions to sample
+        sample_n_actions = self.config.cql_n_actions if self.config.use_cql_loss else 1
+
+        # Sample all actions at once to be more efficient
+        all_noises = torch.randn(batch_size, sample_n_actions, action_dim, device=device)
+
+        next_qs_list = []
+        for i in range(sample_n_actions):
+            # Sample next actions for this noise sample
+            next_actions, _, _ = self.actor_onestep_flow(
+                next_observations, next_observation_features, all_noises[:, i]
+            )
+            next_actions = torch.clamp(next_actions, -1.0, 1.0)
+
+            # Compute Q-values for these actions
+            next_qs_sampled = self.critic_forward(
+                observations=next_observations,
+                actions=next_actions,
+                use_target=True,
+                observation_features=next_observation_features,
+                do_output_normalization=False,
+            )  # (critic_ensemble_size, batch_size)
+
+            next_qs_list.append(next_qs_sampled)
+
+        # Stack to get shape: (critic_ensemble_size, batch_size, n_actions)
+        next_qs = torch.stack(next_qs_list, dim=2)
+
+        return next_actions, next_qs
+
+    def _process_target_next_qs(self, target_next_qs: Tensor) -> Tensor:
+        """Process target Q-values with max backup and other options.
+
+        Similar to JAX _process_target_next_qs but adapted for our implementation.
+        """
+        if self.config.use_cql_loss and self.config.cql_max_target_backup:
+            # Take the max Q-value across actions for each critic and batch element
+            # target_next_qs shape: (critic_ensemble_size, batch_size, cql_n_actions)
+            max_action_indices = target_next_qs.argmax(dim=-1).unsqueeze(-1)
+            target_next_qs = torch.gather(target_next_qs, -1, max_action_indices).squeeze(-1)
+        elif self.config.use_cql_loss:
+            # For CQL without max backup, take mean or implement other aggregation
+            # target_next_qs = target_next_qs.mean(dim=-1)
+            raise NotImplementedError(
+                "CQL without max backup is not implemented yet. "
+                "Please set cql_max_target_backup to True or implement the aggregation logic."
+            )
+        else:
+            # Standard case: just squeeze the action dimension (should be 1)
+            target_next_qs = target_next_qs.squeeze(-1)
+
+        return target_next_qs
 
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
