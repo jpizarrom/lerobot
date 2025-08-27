@@ -96,6 +96,8 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        force_full_n_steps: bool = False,
+        use_terminal_for_next_state: bool = False,
     ):
         """
         Replay buffer for storing transitions.
@@ -137,6 +139,9 @@ class ReplayBuffer:
             base_function = functools.partial(random_shift, pad=4)
             self.image_augmentation_function = torch.compile(base_function)
         self.use_drq = use_drq
+
+        self.force_full_n_steps = force_full_n_steps
+        self.use_terminal_for_next_state = use_terminal_for_next_state
 
     def _initialize_storage(
         self,
@@ -269,32 +274,33 @@ class ReplayBuffer:
         # Compute n-step indices with wrap-around
         steps = torch.arange(n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
 
-        # filter out indices that lead to done/truncated states before n_steps
-        # TODO: support when episode ends before n_steps
-        high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
+        if self.force_full_n_steps:  # TODO: add tests
+            # filter out indices that lead to done/truncated states before n_steps
+            # TODO: support when episode ends before n_steps
+            high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
 
-        def filter_valid_indices(idx: torch.Tensor) -> torch.Tensor:
-            indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
-            dones_seq = self.dones[indices]  # [batch, n_steps]
-            truncated_seq = self.truncateds[indices]  # [batch, n_steps]
+            def filter_valid_indices(idx: torch.Tensor) -> torch.Tensor:
+                indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+                dones_seq = self.dones[indices]  # [batch, n_steps]
+                truncated_seq = self.truncateds[indices]  # [batch, n_steps]
 
-            # Compute masks: 1 until first done/truncation (inclusive)
-            done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
-            done_idx = done_or_truncated.int().argmax(axis=1)
-            # If no done/truncation, keep full sequence
-            has_done_or_truncated = done_or_truncated.any(axis=1)
-            done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
+                # Compute masks: 1 until first done/truncation (inclusive)
+                done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
+                done_idx = done_or_truncated.int().argmax(axis=1)
+                # If no done/truncation, keep full sequence
+                has_done_or_truncated = done_or_truncated.any(axis=1)
+                done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
 
-            return idx[done_idx == n_steps - 1]
+                return idx[done_idx == n_steps - 1]
 
-        idx = filter_valid_indices(idx)
-        while len(idx) < batch_size:
-            # If not enough valid indices, sample some again
-            new_idx = torch.randint(
-                low=0, high=high, size=(batch_size - len(idx),), device=self.storage_device
-            )
-            idx = torch.cat((idx, new_idx), dim=0)
             idx = filter_valid_indices(idx)
+            while len(idx) < batch_size:
+                # If not enough valid indices, sample some again
+                new_idx = torch.randint(
+                    low=0, high=high, size=(batch_size - len(idx),), device=self.storage_device
+                )
+                idx = torch.cat((idx, new_idx), dim=0)
+                idx = filter_valid_indices(idx)
 
         indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
 
@@ -416,10 +422,14 @@ class ReplayBuffer:
                 next_idx = (idx + 1) % self.capacity
                 batch_next_state[key] = self.states[key][next_idx].to(self.device)
 
-                # TODO: handle last position
-                next_state_nsteps_idx = (
-                    torch.where(has_done_or_truncated, idx + done_idx, idx + done_idx + 1) % self.capacity
-                )
+                # TODO: review this way of handling done/truncated for next_state_nsteps and add tests
+                if self.use_terminal_for_next_state:
+                    next_state_nsteps_idx = (
+                        torch.where(has_done_or_truncated, idx + done_idx, idx + done_idx + 1) % self.capacity
+                    )
+                else:
+                    next_state_nsteps_idx = (idx + done_idx + 1) % self.capacity
+
                 batch_next_state_nsteps[key] = self.states[key][next_state_nsteps_idx].to(self.device)
 
         # Apply image augmentation in a batched way if needed
@@ -630,6 +640,8 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        force_full_n_steps: bool = False,
+        use_terminal_for_next_state: bool = False,
     ) -> "ReplayBuffer":
         """
         Convert a LeRobotDataset into a ReplayBuffer.
@@ -666,6 +678,8 @@ class ReplayBuffer:
             use_drq=use_drq,
             storage_device=storage_device,
             optimize_memory=optimize_memory,
+            force_full_n_steps=force_full_n_steps,
+            use_terminal_for_next_state=use_terminal_for_next_state,
         )
 
         # Convert dataset to transitions

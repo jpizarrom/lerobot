@@ -1142,6 +1142,8 @@ def initialize_replay_buffer(
             state_keys=cfg.policy.input_features.keys(),
             storage_device=storage_device,
             optimize_memory=True,
+            force_full_n_steps=cfg.policy.force_full_n_steps,
+            use_terminal_for_next_state=cfg.policy.use_terminal_for_next_state,
         )
 
     logging.info("Resume training load the online dataset")
@@ -1199,6 +1201,8 @@ def initialize_offline_replay_buffer(
         storage_device=storage_device,
         optimize_memory=True,
         capacity=cfg.policy.offline_buffer_capacity,
+        force_full_n_steps=cfg.policy.force_full_n_steps,
+        use_terminal_for_next_state=cfg.policy.use_terminal_for_next_state,
     )
     return offline_replay_buffer
 
