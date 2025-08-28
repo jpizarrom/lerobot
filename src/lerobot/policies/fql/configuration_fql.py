@@ -180,8 +180,8 @@ class FQLConfig(PreTrainedConfig):
     # Frequency of policy updates
     policy_update_freq: int = 1
 
-    force_full_n_steps: bool = False
-    use_terminal_for_next_state: bool = False
+    force_full_n_steps: bool = True
+    use_terminal_for_next_state: bool = True
 
     # SAC algorithm parameters
     # Discount factor for the SAC algorithm

@@ -96,8 +96,8 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
-        force_full_n_steps: bool = False,
-        use_terminal_for_next_state: bool = False,
+        force_full_n_steps: bool = True,
+        use_terminal_for_next_state: bool = True,
     ):
         """
         Replay buffer for storing transitions.
@@ -640,8 +640,8 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
-        force_full_n_steps: bool = False,
-        use_terminal_for_next_state: bool = False,
+        force_full_n_steps: bool = True,
+        use_terminal_for_next_state: bool = True,
     ) -> "ReplayBuffer":
         """
         Convert a LeRobotDataset into a ReplayBuffer.
