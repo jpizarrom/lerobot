@@ -41,12 +41,6 @@ def get_last_item_from_queue(queue: Queue, block=True, timeout: float = 0.1) -> 
                 item = queue.get_nowait()
         except Empty:
             pass
-    while queue.qsize() > 0:
-        try:
-            while True:
-                item = queue.get_nowait()
-        except Empty:
-            pass
 
         return item
 
