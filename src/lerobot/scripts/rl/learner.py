@@ -379,8 +379,6 @@ def add_actor_information_and_train(
                     batch_size=batch_size * 2,  # Use larger batch size for pretraining
                     async_prefetch=async_prefetch,
                     queue_size=2,
-                    n_steps=cfg.policy.chunk_size,
-                    gamma=cfg.policy.discount,
                 )
         else:
             # Process all available transitions to the replay buffer, send by the actor server
@@ -426,8 +424,6 @@ def add_actor_information_and_train(
                     batch_size=batch_size if not cfg.online_learning_only else batch_size * 2,
                     async_prefetch=async_prefetch,
                     queue_size=2,
-                    n_steps=cfg.policy.chunk_size,
-                    gamma=cfg.policy.discount,
                 )
 
             if (
@@ -1141,6 +1137,8 @@ def initialize_replay_buffer(
             state_keys=cfg.policy.input_features.keys(),
             storage_device=storage_device,
             optimize_memory=True,
+            n_steps=cfg.policy.chunk_size,
+            gamma=cfg.policy.discount,
             force_full_n_steps=cfg.policy.force_full_n_steps,
             use_terminal_for_next_state=cfg.policy.use_terminal_for_next_state,
         )
@@ -1162,6 +1160,10 @@ def initialize_replay_buffer(
         device=device,
         state_keys=cfg.policy.input_features.keys(),
         optimize_memory=True,
+        n_steps=cfg.policy.chunk_size,
+        gamma=cfg.policy.discount,
+        force_full_n_steps=cfg.policy.force_full_n_steps,
+        use_terminal_for_next_state=cfg.policy.use_terminal_for_next_state,
     )
 
 
@@ -1200,6 +1202,8 @@ def initialize_offline_replay_buffer(
         storage_device=storage_device,
         optimize_memory=True,
         capacity=cfg.policy.offline_buffer_capacity,
+        n_steps=cfg.policy.chunk_size,
+        gamma=cfg.policy.discount,
         force_full_n_steps=cfg.policy.force_full_n_steps,
         use_terminal_for_next_state=cfg.policy.use_terminal_for_next_state,
     )

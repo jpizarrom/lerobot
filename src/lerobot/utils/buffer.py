@@ -96,6 +96,8 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        n_steps: int | None = None,
+        gamma: float | None = None,
         force_full_n_steps: bool = True,
         use_terminal_for_next_state: bool = True,
     ):
@@ -140,6 +142,8 @@ class ReplayBuffer:
             self.image_augmentation_function = torch.compile(base_function)
         self.use_drq = use_drq
 
+        self.n_steps = n_steps
+        self.gamma = gamma
         self.force_full_n_steps = force_full_n_steps
         self.use_terminal_for_next_state = use_terminal_for_next_state
 
@@ -243,14 +247,10 @@ class ReplayBuffer:
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(
-        self, batch_size: int, n_steps: int | None = None, gamma: float | None = None
-    ) -> BatchTransition:
+    def sample(self, batch_size: int) -> BatchTransition:
         """Sample a random batch of transitions and collate them into batched tensors."""
         if not self.initialized:
             raise RuntimeError("Cannot sample from an empty buffer. Add transitions first.")
-
-        assert n_steps is not None or n_steps > 0, "n_steps must be specified and greater than 0."
 
         batch_size = min(batch_size, self.size)
         high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
@@ -258,7 +258,7 @@ class ReplayBuffer:
         # Random indices for sampling - create on the same device as storage
         idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
 
-        return self._sample(idx=idx, batch_size=batch_size, gamma=gamma, n_steps=n_steps)
+        return self._sample(idx=idx, batch_size=batch_size, gamma=self.gamma, n_steps=self.n_steps)
 
     def _sample(
         self, idx: torch.Tensor, batch_size: int, gamma: float, n_steps: int | None = None
@@ -516,8 +516,6 @@ class ReplayBuffer:
         batch_size: int,
         async_prefetch: bool = True,
         queue_size: int = 2,
-        n_steps: int | None = None,
-        gamma: float | None = None,
     ):
         """
         Creates an infinite iterator that yields batches of transitions.
@@ -534,21 +532,15 @@ class ReplayBuffer:
         while True:  # Create an infinite loop
             if async_prefetch:
                 # Get the standard iterator
-                iterator = self._get_async_iterator(
-                    queue_size=queue_size, batch_size=batch_size, n_steps=n_steps, gamma=gamma
-                )
+                iterator = self._get_async_iterator(queue_size=queue_size, batch_size=batch_size)
             else:
-                iterator = self._get_naive_iterator(
-                    batch_size=batch_size, queue_size=queue_size, n_steps=n_steps, gamma=gamma
-                )
+                iterator = self._get_naive_iterator(batch_size=batch_size, queue_size=queue_size)
 
             # Yield all items from the iterator
             with suppress(StopIteration):
                 yield from iterator
 
-    def _get_async_iterator(
-        self, batch_size: int, queue_size: int = 2, n_steps: int | None = None, gamma: float | None = None
-    ):
+    def _get_async_iterator(self, batch_size: int, queue_size: int = 2):
         """
         Create an iterator that continuously yields prefetched batches in a
         background thread. The design is intentionally simple and avoids busy
@@ -572,7 +564,7 @@ class ReplayBuffer:
             """Continuously put sampled batches into the queue until shutdown."""
             while not shutdown_event.is_set():
                 try:
-                    batch = self.sample(batch_size, n_steps=n_steps, gamma=gamma)
+                    batch = self.sample(batch_size)
                     # The timeout ensures the thread unblocks if the queue is full
                     # and the shutdown event gets set meanwhile.
                     data_queue.put(batch, block=True, timeout=0.5)
@@ -602,9 +594,7 @@ class ReplayBuffer:
             # Give the producer thread a bit of time to finish.
             producer_thread.join(timeout=1.0)
 
-    def _get_naive_iterator(
-        self, batch_size: int, queue_size: int = 2, n_steps: int | None = None, gamma: float | None = None
-    ):
+    def _get_naive_iterator(self, batch_size: int, queue_size: int = 2):
         """
         Creates a simple non-threaded iterator that yields batches.
 
@@ -621,7 +611,7 @@ class ReplayBuffer:
 
         def enqueue(n):
             for _ in range(n):
-                data = self.sample(batch_size, n_steps=n_steps, gamma=gamma)
+                data = self.sample(batch_size)
                 queue.append(data)
 
         enqueue(queue_size)
@@ -640,6 +630,8 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        n_steps: int | None = None,
+        gamma: float | None = None,
         force_full_n_steps: bool = True,
         use_terminal_for_next_state: bool = True,
     ) -> "ReplayBuffer":
@@ -678,6 +670,8 @@ class ReplayBuffer:
             use_drq=use_drq,
             storage_device=storage_device,
             optimize_memory=optimize_memory,
+            n_steps=n_steps,
+            gamma=gamma,
             force_full_n_steps=force_full_n_steps,
             use_terminal_for_next_state=use_terminal_for_next_state,
         )
