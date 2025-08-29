@@ -64,8 +64,7 @@ from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.policies.factory import make_policy
 
 # from lerobot.policies.sac.modeling_sac import SACPolicy
-# from lerobot.policies.fql.modeling_fql import FQLPolicy
-from lerobot.policies.fqlvla.modeling_fqlvla import FQLVLAPolicy
+from lerobot.policies.fql.modeling_fql import FQLPolicy
 from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.scripts.rl.gym_manipulator import make_robot_env
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
@@ -255,7 +254,7 @@ def act_with_policy(
     ### Instantiate the policy in both the actor and learner processes
     ### To avoid sending a SACPolicy object through the port, we create a policy instance
     ### on both sides, the learner sends the updated parameters every n steps to update the actor's parameters
-    policy: FQLVLAPolicy = make_policy(
+    policy: FQLPolicy = make_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
@@ -629,7 +628,7 @@ def interactions_stream(
 
 
 def update_policy_parameters(
-    policy: FQLVLAPolicy, parameters_queue: Queue, device, wait_for_update: bool = False
+    policy: FQLPolicy, parameters_queue: Queue, device, wait_for_update: bool = False
 ):
     bytes_state_dict = get_last_item_from_queue(parameters_queue, block=False)
 

@@ -31,6 +31,8 @@ def create_empty_replay_buffer(
         optimize_memory=optimize_memory,
         use_drq=use_drq,
         image_augmentation_function=image_augmentation_function,
+        force_full_n_steps=False,
+        use_terminal_for_next_state=False,
     )
 
 
