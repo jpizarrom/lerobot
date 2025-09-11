@@ -45,7 +45,7 @@ lerobot-train \
 
 Example of using the pi0 pretrained model outside LeRobot training framework:
 ```python
-policy = Pi0Policy.from_pretrained("lerobot/pi0")
+policy = PI05Policy.from_pretrained("lerobot/pi0")
 ```
 
 """
@@ -60,8 +60,8 @@ from transformers import AutoTokenizer
 
 from lerobot.constants import ACTION, OBS_STATE
 from lerobot.policies.normalize import Normalize, Unnormalize
-from lerobot.policies.pi0.configuration_pi0 import PI0Config
-from lerobot.policies.pi0.paligemma_with_expert import (
+from lerobot.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.policies.pi05.paligemma_with_expert import (
     PaliGemmaWithExpertConfig,
     PaliGemmaWithExpertModel,
 )
@@ -214,15 +214,15 @@ def aloha_gripper_from_angular_inv(value):
     return normalize(value, min_val=0.4, max_val=1.5)
 
 
-class PI0Policy(PreTrainedPolicy):
+class PI05Policy(PreTrainedPolicy):
     """Wrapper class around PI0FlowMatching model to train and run inference within LeRobot."""
 
-    config_class = PI0Config
-    name = "pi0"
+    config_class = PI05Config
+    name = "pi05"
 
     def __init__(
         self,
-        config: PI0Config,
+        config: PI05Config,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
@@ -326,9 +326,9 @@ class PI0Policy(PreTrainedPolicy):
         return transformed_dict
 
     @classmethod
-    def _load_as_safetensor(
-        cls, model: "PI0Policy", model_file: str, map_location: str, strict: bool
-    ) -> "PI0Policy":
+    def _load_as_safetensor_(
+        cls, model: "PI05Policy", model_file: str, map_location: str, strict: bool
+    ) -> "PI05Policy":
         """Override to apply key transformations before loading."""
         from safetensors.torch import load_file
 
@@ -575,22 +575,27 @@ class PI0FlowMatching(nn.Module):
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
+            use_adarms=[False, True],
         )
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_with_export_config)
 
         # Projections are float32
-        self.state_proj = nn.Linear(self.config.max_state_dim, self.config.proj_width)
+
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.config.proj_width)
         self.action_out_proj = nn.Linear(self.config.proj_width, self.config.max_action_dim)
 
-        self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
-        self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
+        self.time_mlp_in = nn.Linear(self.config.proj_width, self.config.proj_width)
+        self.time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
-        self.set_requires_grad()
+        # self.state_proj = nn.Linear(self.config.max_state_dim, self.config.proj_width)
+        # self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
+        # self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
-    def set_requires_grad(self):
-        for params in self.state_proj.parameters():
-            params.requires_grad = self.config.train_state_proj
+        # self.set_requires_grad()
+
+    # def set_requires_grad(self):
+    #     for params in self.state_proj.parameters():
+    #         params.requires_grad = self.config.train_state_proj
 
     def sample_noise(self, shape, device):
         noise = torch.normal(

@@ -26,7 +26,7 @@ from transformers import (
 )
 from transformers.models.auto import CONFIG_MAPPING
 
-from lerobot.policies.pi0.flex_attention import flex_attention_forward
+from lerobot.policies.pi05.flex_attention import flex_attention_forward
 
 
 def apply_rope(x, positions, max_wavelength=10_000):
@@ -66,11 +66,14 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
         freeze_vision_encoder: bool = True,
         train_expert_only: bool = True,
         attention_implementation: str = "eager",
+        use_adarms=None,
         **kwargs,
     ):
         self.freeze_vision_encoder = freeze_vision_encoder
         self.train_expert_only = train_expert_only
         self.attention_implementation = attention_implementation
+        if use_adarms is None:
+            use_adarms = [False, False]
 
         if paligemma_config is None:
             # Default config from Pi0
@@ -95,6 +98,8 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                     "num_key_value_heads": 1,
                     "torch_dtype": "float32",
                     "vocab_size": 257152,
+                    "use_adarms": use_adarms[0],
+                    "adarms_cond_dim": 2048 if use_adarms[0] else None,
                 },
                 vision_config={
                     "hidden_size": 1152,
@@ -143,6 +148,8 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                 transformers_version="4.48.1",
                 use_cache=True,
                 vocab_size=257152,
+                use_adarms=use_adarms[1],
+                adarms_cond_dim=1024 if use_adarms[1] else None,
             )
         elif isinstance(self.gemma_expert_config, dict):
             # Override Pi0 default config for Gemma Expert

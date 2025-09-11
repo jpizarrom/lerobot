@@ -22,9 +22,9 @@ from lerobot.optim.schedulers import (
 )
 
 
-@PreTrainedConfig.register_subclass("pi0")
+@PreTrainedConfig.register_subclass("pi05")
 @dataclass
-class PI0Config(PreTrainedConfig):
+class PI05Config(PreTrainedConfig):
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 50
