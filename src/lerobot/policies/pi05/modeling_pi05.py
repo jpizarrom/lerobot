@@ -458,11 +458,23 @@ class PI05Policy(PreTrainedPolicy):
         for key in present_img_keys:
             img = batch[key]
 
+            # TODO: This is a hack to handle both [B, C, H, W] and [B, H, W, C] formats
+            # Handle both [B, C, H, W] and [B, H, W, C] formats
+            is_channels_first = img.shape[1] == 3  # Check if channels are in dimension 1
+
+            if not is_channels_first:
+                # Convert [B, H, W, C] to [B, C, H, W] for processing
+                img = img.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+
             if self.config.resize_imgs_with_padding is not None:
                 img = resize_with_pad(img, *self.config.resize_imgs_with_padding, pad_value=0)
 
             # Normalize from range [0,1] to [-1,1] as expected by siglip
             img = img * 2.0 - 1.0
+
+            # # Convert back to [B, H, W, C] format if it was originally not channels-first
+            # if not is_channels_first:
+            #     img = img.permute(0, 2, 3, 1)  # [B, C, H, W] -> [B, H, W, C]
 
             bsize = img.shape[0]
             device = img.device
@@ -570,12 +582,14 @@ class PI0FlowMatching(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.pi05 = True
 
         paligemma_with_export_config = PaliGemmaWithExpertConfig(
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
             use_adarms=[False, True],
+            # precision="bfloat16",
         )
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_with_export_config)
 
@@ -584,18 +598,27 @@ class PI0FlowMatching(nn.Module):
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.config.proj_width)
         self.action_out_proj = nn.Linear(self.config.proj_width, self.config.max_action_dim)
 
-        self.time_mlp_in = nn.Linear(self.config.proj_width, self.config.proj_width)
-        self.time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
+        if self.pi05:
+            self.time_mlp_in = nn.Linear(self.config.proj_width, self.config.proj_width)
+            self.time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
+        else:
+            self.state_proj = nn.Linear(self.config.max_state_dim, self.config.proj_width)
+            self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
+            self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
-        # self.state_proj = nn.Linear(self.config.max_state_dim, self.config.proj_width)
-        # self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
-        # self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
+        # torch.set_float32_matmul_precision("high")
+        # self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
         # self.set_requires_grad()
 
     # def set_requires_grad(self):
     #     for params in self.state_proj.parameters():
     #         params.requires_grad = self.config.train_state_proj
+
+    def _prepare_attention_masks_4d(self, att_2d_masks):
+        """Helper method to prepare 4D attention masks for transformer."""
+        att_2d_masks_4d = att_2d_masks[:, None, :, :]
+        return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -628,19 +651,23 @@ class PI0FlowMatching(nn.Module):
         for (
             img,
             img_mask,
-        ) in zip(images, img_masks, strict=False):
+        ) in zip(images, img_masks, strict=True):
             img_emb = self.paligemma_with_expert.embed_image(img)
-            img_emb = img_emb.to(dtype=torch.bfloat16)
-
-            # Normalize image embeddings
-            img_emb_dim = img_emb.shape[-1]
-            img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
 
             bsize, num_img_embs = img_emb.shape[:2]
-            img_mask = img_mask[:, None].expand(bsize, num_img_embs)
+
+            # img_emb = img_emb.to(dtype=torch.bfloat16)
+
+            # # Normalize image embeddings
+            # img_emb_dim = img_emb.shape[-1]
+            # img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
+
+            # bsize, num_img_embs = img_emb.shape[:2]
+            # img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
             embs.append(img_emb)
-            pad_masks.append(img_mask)
+            pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
+            # pad_masks.append(img_mask)
 
             # Create attention masks so that image tokens attend to each other
             att_masks += [0] * num_img_embs
@@ -661,6 +688,9 @@ class PI0FlowMatching(nn.Module):
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
+
+        # Get batch size from the first dimension of the concatenated tensors
+        bsize = pad_masks.shape[0]
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
         return embs, pad_masks, att_masks
@@ -671,52 +701,86 @@ class PI0FlowMatching(nn.Module):
         pad_masks = []
         att_masks = []
 
-        # Embed state
-        state_emb = self.state_proj(state)
-        state_emb = state_emb.to(dtype=torch.bfloat16)
-        embs.append(state_emb[:, None, :])
-        bsize = state_emb.shape[0]
-        dtype = state_emb.dtype
-        device = state_emb.device
+        if not self.pi05:
+            if self.state_proj.weight.dtype == torch.float32:
+                state = state.to(torch.float32)
 
-        state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
-        pad_masks.append(state_mask)
+            # Embed state
+            def state_proj_func(state):
+                return self.state_proj(state)
 
-        # Set attention masks so that image and language inputs do not attend to state or actions
-        att_masks += [1]
+            # state_emb = self._apply_checkpoint(state_proj_func, state)
+            state_emb = state_proj_func(state)
+
+            embs.append(state_emb[:, None, :])
+            bsize = state_emb.shape[0]
+            device = state_emb.device
+
+            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+            pad_masks.append(state_mask)
+
+            # Set attention masks so that image and language inputs do not attend to state or actions
+            att_masks += [1]
 
         # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = create_sinusoidal_pos_embedding(
-            timestep, self.config.proj_width, min_period=4e-3, max_period=4.0, device=device
+            timestep,
+            self.action_in_proj.out_features,
+            min_period=4e-3,
+            max_period=4.0,
+            device=timestep.device,
         )
-        time_emb = time_emb.type(dtype=dtype)
+        time_emb = time_emb.type(dtype=timestep.dtype)
 
         # Fuse timestep + action information using an MLP
-        action_emb = self.action_in_proj(noisy_actions)
+        def action_proj_func(noisy_actions):
+            return self.action_in_proj(noisy_actions)
 
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
-        action_time_emb = torch.cat([action_emb, time_emb], dim=2)
+        # action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
+        action_emb = action_proj_func(noisy_actions)
 
-        action_time_emb = self.action_time_mlp_in(action_time_emb)
-        action_time_emb = F.silu(action_time_emb)  # swish == silu
-        action_time_emb = self.action_time_mlp_out(action_time_emb)
+        if not self.pi05:
+            time_emb = time_emb[:, None, :].expand_as(action_emb)
+            action_time_emb = torch.cat([action_emb, time_emb], dim=2)
+
+            # Apply MLP layers
+            def mlp_func(action_time_emb):
+                x = self.action_time_mlp_in(action_time_emb)
+                x = F.silu(x)  # swish == silu
+                return self.action_time_mlp_out(x)
+
+            # action_time_emb = self._apply_checkpoint(mlp_func, action_time_emb)
+            action_time_emb = mlp_func(action_time_emb)
+            adarms_cond = None
+        else:
+            # time MLP (for adaRMS)
+            def time_mlp_func(time_emb):
+                x = self.time_mlp_in(time_emb)
+                x = F.silu(x)  # swish == silu
+                x = self.time_mlp_out(x)
+                return F.silu(x)
+
+            # time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
+            time_emb = time_mlp_func(time_emb)
+            action_time_emb = action_emb
+            adarms_cond = time_emb
 
         # Add to input tokens
         embs.append(action_time_emb)
 
         bsize, action_time_dim = action_time_emb.shape[:2]
-        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
+        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device)
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.n_action_steps - 1))
+        att_masks += [1] + ([0] * (self.config.chunk_size - 1))
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
-        return embs, pad_masks, att_masks
+        return embs, pad_masks, att_masks, adarms_cond
 
     def forward(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
@@ -735,23 +799,32 @@ class PI0FlowMatching(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        # if (
+        #     self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+        #     == torch.bfloat16
+        # ):
+        #     suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+        #     prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        # Prepare attention masks
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
         (_, suffix_out), _ = self.paligemma_with_expert.forward(
-            attention_mask=att_2d_masks,
+            attention_mask=att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, suffix_embs],
             use_cache=False,
-            fill_kv_cache=False,
+            # fill_kv_cache=False,
+            adarms_cond=[None, adarms_cond],
         )
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
@@ -759,13 +832,14 @@ class PI0FlowMatching(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
+    @torch.no_grad()
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = state.shape[0]
         device = state.device
 
         if noise is None:
-            actions_shape = (bsize, self.config.n_action_steps, self.config.max_action_dim)
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
@@ -775,13 +849,16 @@ class PI0FlowMatching(nn.Module):
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
         # Compute image and language key value cache
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
         _, past_key_values = self.paligemma_with_expert.forward(
-            attention_mask=prefix_att_2d_masks,
+            attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, None],
             use_cache=self.config.use_cache,
-            fill_kv_cache=True,
+            # fill_kv_cache=True,
         )
 
         dt = -1.0 / self.config.num_steps
@@ -813,11 +890,12 @@ class PI0FlowMatching(nn.Module):
         timestep,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
         prefix_len = prefix_pad_masks.shape[1]
+
         prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
 
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
@@ -827,16 +905,21 @@ class PI0FlowMatching(nn.Module):
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
+        # Prepare attention masks
+        full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
+
         outputs_embeds, _ = self.paligemma_with_expert.forward(
-            attention_mask=full_att_2d_masks,
+            attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=False,
+            use_cache=False,
+            # fill_kv_cache=False,
+            adarms_cond=[None, adarms_cond],
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         return v_t

@@ -63,6 +63,24 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, tokenizer_id: st
             adapt_to_pi_aloha=False,
             use_delta_joint_actions_aloha=False,
         )
+    elif "pi05_droid" in checkpoint_dir:
+        pi05_config = PI05Config(
+            empty_cameras=0,
+            adapt_to_pi_aloha=False,
+            use_delta_joint_actions_aloha=False,
+            chunk_size=15,
+            n_action_steps=15,
+            tokenizer_max_length=200,
+        )
+    elif "pi05_libero" in checkpoint_dir:
+        pi05_config = PI05Config(
+            empty_cameras=0,
+            adapt_to_pi_aloha=False,
+            use_delta_joint_actions_aloha=False,
+            chunk_size=10,
+            n_action_steps=10,
+            # discrete_state_input=False
+        )
     else:
         raise ValueError()
 
