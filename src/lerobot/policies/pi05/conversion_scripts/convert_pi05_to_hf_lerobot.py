@@ -5,10 +5,15 @@ import safetensors.torch
 
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+# from lerobot.configs.types import NormalizationMode
 
 
-def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, tokenizer_id: str, output_path: str):
-    openpi_model = safetensors.torch.load_file(os.path.join(checkpoint_dir, "model.safetensors"))
+def convert_pi0_checkpoint(
+    checkpoint_dir: str, precision: str, tokenizer_id: str, output_path: str
+):
+    openpi_model = safetensors.torch.load_file(
+        os.path.join(checkpoint_dir, "model.safetensors")
+    )
     # openpi_config = json.load(open(os.path.join(checkpoint_dir, "config.json")))
 
     # add prefix model. to all keys
@@ -45,16 +50,22 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, tokenizer_id: st
     for key in openpi_model.keys():
         if key.endswith(".paligemma_with_expert.paligemma.lm_head.weight"):
             lm_head_key = key
-        elif key.endswith(".paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"):
+        elif key.endswith(
+            ".paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        ):
             embed_tokens_key = key
         if lm_head_key and embed_tokens_key:
             break
 
     if lm_head_key and not embed_tokens_key:
-        embed_tokens_key = lm_head_key.replace(".lm_head.weight", ".model.language_model.embed_tokens.weight")
+        embed_tokens_key = lm_head_key.replace(
+            ".lm_head.weight", ".model.language_model.embed_tokens.weight"
+        )
         openpi_model[embed_tokens_key] = openpi_model[lm_head_key]
     elif embed_tokens_key and not lm_head_key:
-        lm_head_key = embed_tokens_key.replace(".model.language_model.embed_tokens.weight", ".lm_head.weight")
+        lm_head_key = embed_tokens_key.replace(
+            ".model.language_model.embed_tokens.weight", ".lm_head.weight"
+        )
         openpi_model[lm_head_key] = openpi_model[embed_tokens_key]
 
     if "pi05_base" in checkpoint_dir:
@@ -65,12 +76,17 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, tokenizer_id: st
         )
     elif "pi05_droid" in checkpoint_dir:
         pi05_config = PI05Config(
-            empty_cameras=0,
+            empty_cameras=1,
             adapt_to_pi_aloha=False,
             use_delta_joint_actions_aloha=False,
             chunk_size=15,
             n_action_steps=15,
             tokenizer_max_length=200,
+            # normalization_mapping={
+            #     "VISUAL": NormalizationMode.IDENTITY,
+            #     "STATE": NormalizationMode.QUANTILE,
+            #     "ACTION": NormalizationMode.QUANTILE,
+            # },
         )
     elif "pi05_libero" in checkpoint_dir:
         pi05_config = PI05Config(

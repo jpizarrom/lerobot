@@ -498,12 +498,21 @@ class PI05Policy(PreTrainedPolicy):
         """Tokenize the text input"""
         device = batch[OBS_STATE].device
         tasks = batch["task"]
+        state = batch[OBS_STATE]
+        bins = torch.linspace(-1, 1, 256 + 1, device=device)[:-1]
+        discretized = torch.bucketize(state, bins) - 1
+        discretized = discretized[:, :32]  # Take only first 32 dimensions
 
         # PaliGemma prompt has to end with a new line
-        tasks = [task if task.endswith("\n") else f"{task}\n" for task in tasks]
+        prompts = []
+        for txt, disc in zip(tasks, discretized, strict=True):
+            cleaned_text = txt.strip().replace("_", " ").replace("\n", " ")
+            state_str = " ".join(str(val.item()) for val in disc)
+            task = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+            prompts.append(task)
 
         tokenized_prompt = self.language_tokenizer.__call__(
-            tasks,
+            prompts,
             padding="max_length",
             padding_side="right",
             max_length=self.config.tokenizer_max_length,
@@ -606,7 +615,7 @@ class PI0FlowMatching(nn.Module):
             self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
             self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
-        # torch.set_float32_matmul_precision("high")
+        torch.set_float32_matmul_precision("high")
         # self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
         # self.set_requires_grad()

@@ -190,7 +190,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
 
         # self.to_bfloat16_like_physical_intelligence()
         self.to_bfloat16_for_selected_params("bfloat16")
-        self.set_requires_grad()
+        # self.set_requires_grad()
 
     def set_requires_grad(self):
         if self.config.freeze_vision_encoder:
