@@ -128,7 +128,7 @@ def get_default_peft_configuration(policy_type):
         }
     elif policy_type == "pi05_openpi":
         return {
-            "target_modules": r"(model\.vlm_with_expert\.lm_expert\..*\.(q_proj|v_proj)|model\.action_.*|model\.state_proj.*)",
+            "target_modules": r"(model\.paligemma_with_expert\.gemma_expert\..*\.(q_proj|v_proj)|model\.action_.*|model\.state_proj.*)",
             # "target_modules": "all-linear",
             # "target_modules": r"(.*_proj|.*\.action_head)",
             "modules_to_save": [
