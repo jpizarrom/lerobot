@@ -463,7 +463,6 @@ class ReplayBuffer:
         # # Clear next_state if the next index is after the done/truncated index
         # # (i.e., if the transition ends the episode, empty the next_state)
         # for key in batch_next_state_nsteps:
-        #     # import pdb; pdb.set_trace()
         #     dims_to_expand = batch_next_state_nsteps[key].ndim - 1
         #     # has_done_or_truncated_expanded = has_done_or_truncated.view(batch_size, *([1] * dims_to_expand)).expand_as(batch_next_state_nsteps[key]).to(self.device)
         #     # batch_next_state_nsteps[key] = batch_next_state_nsteps[key] * (~has_done_or_truncated_expanded)

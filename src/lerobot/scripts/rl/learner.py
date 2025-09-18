@@ -1445,7 +1445,6 @@ def process_transitions(
             #         )
             # transition["state"] = state
 
-            # import pdb; pdb.set_trace()
 
             replay_buffer.add(**transition)
 

@@ -66,17 +66,17 @@ dependencies = [
     # Core dependencies
     "cmake>=3.29.0.1",
     "einops>=0.8.0",
-    "opencv-python-headless>=4.9.0",
-    "av>=14.2.0",
+    "opencv-python>=4.11.0.86",
+    "av==15.0.0",
     "jsonlines>=4.0.0",
     "packaging>=24.2",
-    "pynput>=1.7.7",
+#    "pynput>=1.7.7",
     "pyserial>=3.5",
     "wandb>=0.20.0",
 
-    "torch>=2.2.1,<2.8.0", # TODO: Bumb dependency
-    "torchcodec>=0.2.1,<0.6.0; sys_platform != 'win32' and (sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')) and (sys_platform != 'darwin' or platform_machine != 'x86_64')", # TODO: Bumb dependency
-    "torchvision>=0.21.0,<0.23.0", # TODO: Bumb dependency
+    "torch>=2.2.1", # TODO: Bumb dependency
+    "torchcodec>=0.2.1; sys_platform != 'win32' and (sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')) and (sys_platform != 'darwin' or platform_machine != 'x86_64')", # TODO: Bumb dependency
+    "torchvision>=0.21.0", # TODO: Bumb dependency
 
     "draccus==0.10.0", # TODO: Remove ==
     "gymnasium>=0.29.1,<1.0.0", # TODO: Bumb dependency
@@ -95,7 +95,7 @@ dependencies = [
 # Common
 pygame-dep = ["pygame>=2.5.1"]
 placo-dep = ["placo>=0.9.6"]
-transformers-dep = ["transformers>=4.50.3,<4.52.0"] # TODO: Bumb dependency
+transformers-dep = ["transformers>=4.50.3"] # TODO: Bumb dependency
 grpcio-dep = ["grpcio==1.73.1", "protobuf==6.31.0"]
 
 # Motors
