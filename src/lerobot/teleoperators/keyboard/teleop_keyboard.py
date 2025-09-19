@@ -166,14 +166,23 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
         if self.config.use_gripper:
             return {
                 "dtype": "float32",
-                "shape": (4,),
-                "names": {"delta_x": 0, "delta_y": 1, "delta_z": 2, "gripper": 3},
+                "shape": (8,),
+                "names": {
+                    "l_delta_x": 0,
+                    "l_delta_y": 1,
+                    "l_delta_z": 2,
+                    "r_delta_x": 3,
+                    "r_delta_y": 4,
+                    "r_delta_z": 5,
+                    "l_gripper": 6,
+                    "r_gripper": 7,
+                },
             }
         else:
             return {
                 "dtype": "float32",
-                "shape": (3,),
-                "names": {"delta_x": 0, "delta_y": 1, "delta_z": 2},
+                "shape": (6,),
+                "names": {"l_delta_x": 0, "l_delta_y": 1, "l_delta_z": 2, "r_delta_x": 3, "r_delta_y": 4, "r_delta_z": 5},
             }
 
     def _on_press(self, key):
@@ -197,6 +206,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
         delta_y = 0.0
         delta_z = 0.0
         gripper_action = 1.0
+        r_delta_x = 0.0
+        r_delta_y = 0.0
+        r_delta_z = 0.0
+        r_gripper_action = 1.0
 
         # Generate action based on current key states
         for key, val in self.current_pressed.items():
@@ -226,12 +239,16 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
         self.current_pressed.clear()
 
         action_dict = {
-            "delta_x": delta_x,
-            "delta_y": delta_y,
-            "delta_z": delta_z,
+            "l_delta_x": delta_x,
+            "l_delta_y": delta_y,
+            "l_delta_z": delta_z,
+            "r_delta_x": r_delta_x,
+            "r_delta_y": r_delta_y,
+            "r_delta_z": r_delta_z,
         }
 
         if self.config.use_gripper:
-            action_dict["gripper"] = gripper_action
+            action_dict["l_gripper"] = gripper_action
+            action_dict["r_gripper"] = r_gripper_action
 
         return action_dict

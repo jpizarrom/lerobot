@@ -153,7 +153,7 @@ class ACFQLPolicy(
             noises = torch.randn(batch_shape, action_dim, device=device)
             actions, _, _ = self.actor_onestep_flow(batch, observations_features, noises)
 
-            actions = actions.reshape(batch_shape, -1, 4)
+            actions = actions.reshape(batch_shape, -1, 8)
             actions = torch.clamp(actions, -1.0, 1.0)
             actions = self.unnormalize_targets({"action": actions})["action"]
 
@@ -589,7 +589,7 @@ class ACFQLPolicy(
         t = torch.rand(batch_size, 1, device=observations["observation.state"].device)
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
-        vel = vel.reshape(batch_size, -1, 4)  # Reshape to match action dimensions
+        vel = vel.reshape(batch_size, -1, 8)  # Reshape to match action dimensions
 
         vel_pred, _, _ = self.actor_bc_flow(observations, observation_features, x_t, t)
         vel_pred = vel_pred.reshape(batch_size, actions_is_pad.shape[1], -1)
@@ -904,7 +904,7 @@ class ACFQLPolicy(
         heads = [
             CriticHead(
                 input_dim=self.encoder_critic.output_dim
-                + (continuous_action_dim + 1) * self.config.chunk_size,
+                + (continuous_action_dim + 2) * self.config.chunk_size,
                 **asdict(self.config.critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -915,7 +915,7 @@ class ACFQLPolicy(
         target_heads = [
             CriticHead(
                 input_dim=self.encoder_critic.output_dim
-                + (continuous_action_dim + 1) * self.config.chunk_size,
+                + (continuous_action_dim + 2) * self.config.chunk_size,
                 **asdict(self.config.critic_network_kwargs),
             )
             for _ in range(self.config.num_critics)
@@ -940,11 +940,11 @@ class ACFQLPolicy(
             encoder=self.encoder_actor_bc_flow,
             network=MLP(
                 input_dim=self.encoder_actor_bc_flow.output_dim
-                + (continuous_action_dim + 1) * self.config.chunk_size
+                + (continuous_action_dim + 2) * self.config.chunk_size
                 + 1,
                 **params,
             ),
-            action_dim=(continuous_action_dim + 1) * self.config.chunk_size,
+            action_dim=(continuous_action_dim + 2) * self.config.chunk_size,
             # num_discrete_actions=self.config.num_discrete_actions* self.config.chunk_size,
             encoder_is_shared=self.shared_encoder,
             **asdict(self.config.policy_kwargs),
@@ -966,10 +966,10 @@ class ACFQLPolicy(
             encoder=self.encoder_actor_onestep_flow,
             network=MLP(
                 input_dim=self.encoder_actor_onestep_flow.output_dim
-                + (continuous_action_dim + 1) * self.config.chunk_size,
+                + (continuous_action_dim + 2) * self.config.chunk_size,
                 **params,
             ),
-            action_dim=(continuous_action_dim + 1) * self.config.chunk_size,
+            action_dim=(continuous_action_dim + 2) * self.config.chunk_size,
             # num_discrete_actions=self.config.num_discrete_actions* self.config.chunk_size,
             encoder_is_shared=self.shared_encoder,
             **asdict(self.config.policy_kwargs),
