@@ -226,10 +226,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
                 l_delta_z = -int(val)
             elif key == "l": # top
                 l_delta_z = int(val)
-            elif key == "k": # open
+            elif key == ",": # close
                 # Gripper actions are expected to be between 0 (close), 1 (stay), 2 (open)
                 l_gripper_action = int(val) + 1
-            elif key == ",": # close
+            elif key == "k": # open
                 l_gripper_action = int(val) - 1
             # righ arm
             elif key == "8": # up
@@ -244,10 +244,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
                 r_delta_z = -int(val)
             elif key == "j": # top
                 r_delta_z = int(val)
-            elif key == "h": # open
+            elif key == "n": # close
                 # Gripper actions are expected to be between 0 (close), 1 (stay), 2 (open)
                 r_gripper_action = int(val) + 1
-            elif key == "n": # close
+            elif key == "h": # open
                 r_gripper_action = int(val) - 1
             elif val:
                 # If the key is pressed, add it to the misc_keys_queue
