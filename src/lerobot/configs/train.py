@@ -186,3 +186,4 @@ class TrainRLServerPipelineConfig(TrainPipelineConfig):
     online_learning_only: bool = False  # If True, the training will only use the online dataset
     initialize_online_buffer: bool = False  # If True, the online buffer will be initialized
     initialize_offline_buffer: bool = False  # If True, the offline buffer will be initialized
+    initialize_offline_buffer_empty: bool = False  # If True, the offline buffer will be initialized as empty

@@ -202,10 +202,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
             )
 
         self._drain_pressed_keys()
-        delta_x = 0.0
-        delta_y = 0.0
-        delta_z = 0.0
-        gripper_action = 1.0
+        l_delta_x = 0.0
+        l_delta_y = 0.0
+        l_delta_z = 0.0
+        l_gripper_action = 1.0
         r_delta_x = 0.0
         r_delta_y = 0.0
         r_delta_z = 0.0
@@ -213,23 +213,42 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
 
         # Generate action based on current key states
         for key, val in self.current_pressed.items():
+            # left arm
             if key == keyboard.Key.up:
-                delta_y = -int(val)
+                l_delta_y = -int(val)
             elif key == keyboard.Key.down:
-                delta_y = int(val)
+                l_delta_y = int(val)
             elif key == keyboard.Key.left:
-                delta_x = int(val)
+                l_delta_x = int(val)
             elif key == keyboard.Key.right:
-                delta_x = -int(val)
-            elif key == "n":
-                delta_z = -int(val)
-            elif key == "m":
-                delta_z = int(val)
-            elif key == "h":
+                l_delta_x = -int(val)
+            elif key == ".": # bottom
+                l_delta_z = -int(val)
+            elif key == "l": # top
+                l_delta_z = int(val)
+            elif key == "k": # open
                 # Gripper actions are expected to be between 0 (close), 1 (stay), 2 (open)
-                gripper_action = int(val) + 1
-            elif key == "j":
-                gripper_action = int(val) - 1
+                l_gripper_action = int(val) + 1
+            elif key == ",": # close
+                l_gripper_action = int(val) - 1
+            # righ arm
+            elif key == "8": # up
+                r_delta_y = -int(val)
+            elif key == "2": # down
+                r_delta_y = int(val)
+            elif key == "4": # left
+                r_delta_x = int(val)
+            elif key == "6": # right
+                r_delta_x = -int(val)
+            elif key == "m": # bottom
+                r_delta_z = -int(val)
+            elif key == "j": # top
+                r_delta_z = int(val)
+            elif key == "h": # open
+                # Gripper actions are expected to be between 0 (close), 1 (stay), 2 (open)
+                r_gripper_action = int(val) + 1
+            elif key == "n": # close
+                r_gripper_action = int(val) - 1
             elif val:
                 # If the key is pressed, add it to the misc_keys_queue
                 # this will record key presses that are not part of the delta_x, delta_y, delta_z
@@ -239,16 +258,16 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
         self.current_pressed.clear()
 
         action_dict = {
-            "l_delta_x": delta_x,
-            "l_delta_y": delta_y,
-            "l_delta_z": delta_z,
+            "l_delta_x": l_delta_x,
+            "l_delta_y": l_delta_y,
+            "l_delta_z": l_delta_z,
             "r_delta_x": r_delta_x,
             "r_delta_y": r_delta_y,
             "r_delta_z": r_delta_z,
         }
 
         if self.config.use_gripper:
-            action_dict["l_gripper"] = gripper_action
+            action_dict["l_gripper"] = l_gripper_action
             action_dict["r_gripper"] = r_gripper_action
 
         return action_dict
