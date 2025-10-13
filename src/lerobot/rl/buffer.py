@@ -49,6 +49,18 @@ class BatchTransitionNSteps(TypedDict):
     complementary_info: dict[str, torch.Tensor | float | int] | None = None
 
 
+class BatchTransitionNStepsSB3(TypedDict):
+    state: dict[str, torch.Tensor]
+    action: torch.Tensor
+    reward: torch.Tensor
+    next_state: dict[str, torch.Tensor]
+    done: torch.Tensor
+    truncated: torch.Tensor
+    action_is_pad: torch.Tensor
+    discount: torch.Tensor
+    complementary_info: dict[str, torch.Tensor | float | int] | None = None
+
+
 def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Tensor:
     """
     Perform a per-image random crop over a batch of images in a vectorized way.
@@ -314,7 +326,7 @@ class ReplayBuffer:
             complementary_info=batch_complementary_info,
         )
 
-    def sample_nstep_full(
+    def sample_nstep_full_(
         self,
         batch_size: int,
         n_steps: int,
@@ -432,6 +444,222 @@ class ReplayBuffer:
             terminals=terminals,
             valid=valid,
             complementary_info=batch_complementary_info,
+        )
+
+    def sample_nstep_full(
+        self,
+        batch_size: int,
+        n_steps: int,
+        gamma: float,
+        # self, idx: torch.Tensor, batch_size: int, gamma: float, n_steps: int | None = None
+    ) -> BatchTransitionNStepsSB3:
+        # Based on https://github.com/DLR-RM/stable-baselines3/blob/30ceaf3ea1f29ca7213735eaa8460ca2fcfaf9c0/stable_baselines3/common/buffers.py#L924
+
+        batch_size = min(batch_size, self.size)
+        high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
+
+        # Random indices for sampling - create on the same device as storage
+        idx = torch.randint(low=0, high=high, size=(batch_size,), device=self.storage_device)
+
+        last_valid_index = self.position - 1
+        original_truncated_values = self.truncateds[last_valid_index].clone()
+        self.truncateds[last_valid_index] = torch.logical_or(
+            original_truncated_values, torch.logical_not(self.dones[last_valid_index])
+        )
+
+        # Compute n-step indices with wrap-around
+        steps = torch.arange(n_steps, device=self.storage_device).reshape(1, -1)  # shape: [1, n_steps]
+
+        self.force_full_n_steps = False
+        if self.force_full_n_steps:  # TODO: add tests
+            # filter out indices that lead to done/truncated states before n_steps
+            # TODO: support when episode ends before n_steps
+            high = max(0, self.size - 1) if self.optimize_memory and self.size < self.capacity else self.size
+
+            def filter_valid_indices(idx: torch.Tensor) -> torch.Tensor:
+                indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+                dones_seq = self.dones[indices]  # [batch, n_steps]
+                truncated_seq = self.truncateds[indices]  # [batch, n_steps]
+
+                # Compute masks: 1 until first done/truncation (inclusive)
+                done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
+                done_idx = done_or_truncated.int().argmax(axis=1)
+                # If no done/truncation, keep full sequence
+                has_done_or_truncated = done_or_truncated.any(axis=1)
+                done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
+
+                return idx[done_idx == n_steps - 1]
+
+            idx = filter_valid_indices(idx)
+            while len(idx) < batch_size:
+                # If not enough valid indices, sample some again
+                new_idx = torch.randint(
+                    low=0, high=high, size=(batch_size - len(idx),), device=self.storage_device
+                )
+                idx = torch.cat((idx, new_idx), dim=0)
+                idx = filter_valid_indices(idx)
+
+        indices = (idx[:, None] + steps) % self.capacity  # shape: [batch, n_steps]
+
+        # Retrieve sequences of transitions
+        rewards_seq = self.rewards[indices]  # [batch, n_steps]
+        dones_seq = self.dones[indices]  # [batch, n_steps]
+        truncated_seq = self.truncateds[indices]  # [batch, n_steps]
+
+        # Compute masks: 1 until first done/truncation (inclusive)
+        done_or_truncated = torch.logical_or(dones_seq, truncated_seq)
+        done_idx = done_or_truncated.int().argmax(axis=1)
+        # If no done/truncation, keep full sequence
+        has_done_or_truncated = done_or_truncated.any(axis=1)
+        done_idx = torch.where(has_done_or_truncated, done_idx, n_steps - 1)
+        # done_idx = torch.where(has_done_or_truncated, done_idx, torch.full_like(done_idx, n_steps - 1))
+
+        mask = (
+            torch.arange(n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]
+        )  # shape: [batch, n_steps]
+        # Compute discount factors for bootstrapping (using target Q-Value)
+        # It is gamma ** n_steps by default but should be adjusted in case of early termination/truncation.
+        target_q_discounts = gamma ** mask.sum(axis=1, keepdims=True)  # .astype(np.float32)  # [batch, 1]
+
+        # Apply discount
+        discounts = gamma ** torch.arange(
+            n_steps, dtype=torch.float32, device=self.storage_device
+        )  # .reshape(1, -1)  # [1, n_steps]
+        discounted_rewards = rewards_seq * discounts * mask
+        n_step_returns = discounted_rewards.sum(axis=1, keepdims=True)  # [batch, 1]
+
+        # Compute indices of next_obs/done at the final point of the n-step transition
+        last_indices = (idx + done_idx) % self.capacity
+        # next_obs = self._normalize_obs(self.next_observations[last_indices, env_indices], env)
+        # next_dones = self.dones[last_indices].to(self.device).float()
+        # next_truncateds = self.truncateds[last_indices].to(self.device).float()
+
+        # batch_rewards = self.rewards[idx].to(self.device)
+        batch_rewards_nsteps = n_step_returns.to(self.device)
+        batch_discounts_nsteps = target_q_discounts.to(self.device)
+        batch_dones_nsteps = self.dones[last_indices].to(self.device).float()
+        # batch_dones_nsteps = torch.logical_or(self.dones[last_indices], self.truncateds[last_indices]).to(self.device).float()
+        # batch_dones_nsteps = next_dones * (1.0 - next_truncateds)
+        batch_truncateds_nsteps = self.truncateds[last_indices].to(self.device).float()
+        # batch_mc_returns = mc_returns.to(self.device)
+
+        # batch_actions [batch, n_steps, ...] copy actions until done_idx, then copy last action
+        batch_actions = self.actions[indices]  # [batch, n_steps, ...]
+        # Create a mask for valid steps (before done/truncation)
+        mask = (
+            torch.arange(n_steps, device=self.storage_device).reshape(1, -1) <= done_idx[:, None]
+        )  # [batch, n_steps]
+        # Expand mask to match action shape
+        # Expand mask to match action shape using .view and .expand
+        mask_expanded = mask.view(batch_size, n_steps, *([1] * (batch_actions.ndim - 2))).expand_as(
+            batch_actions
+        )
+        # Mask out actions after done/truncation
+        batch_actions = batch_actions * mask_expanded  # Zero out actions after done/truncation
+        batch_actions_is_pad = ~mask
+
+        batch_actions = batch_actions.to(self.device)  # Move actions to the target device
+        batch_actions_is_pad = batch_actions_is_pad.to(self.device)  # Move action mask to the target device
+
+        # Revert back tmp changes to avoid sampling across episodes
+        self.truncateds[last_valid_index] = original_truncated_values
+
+        # Gather observations and actions
+        # obs = self._normalize_obs(self.observations[batch_inds, env_indices], env)
+        # actions = self.actions[batch_inds, env_indices]
+
+        # Identify image keys that need augmentation
+        image_keys = [k for k in self.states if k.startswith("observation.image")] if self.use_drq else []
+
+        # Create batched state and next_state
+        batch_state = {}
+        batch_next_state = {}
+        batch_next_state_nsteps = {}
+
+        self.use_terminal_for_next_state = False
+        # First pass: load all state tensors to target device
+        for key in self.states:
+            batch_state[key] = self.states[key][idx].to(self.device)
+
+            if not self.optimize_memory:
+                # Standard approach - load next_states directly
+                batch_next_state[key] = self.next_states[key][idx].to(self.device)
+                batch_next_state_nsteps[key] = self.next_states[key][last_indices].to(self.device)
+            else:
+                # Memory-optimized approach - get next_state from the next index
+                next_idx = (idx + 1) % self.capacity
+                batch_next_state[key] = self.states[key][next_idx].to(self.device)
+
+                if self.use_terminal_for_next_state:
+                    # TODO: review this way of handling done/truncated for next_state_nsteps and add tests
+                    next_state_nsteps_idx = (
+                        torch.where(has_done_or_truncated, idx + done_idx, idx + done_idx + 1) % self.capacity
+                    )
+                else:
+                    # TODO: review and add test: next_state_nsteps_idx can be out of bounds
+                    next_state_nsteps_idx = (idx + done_idx + 1) % self.capacity
+
+                batch_next_state_nsteps[key] = self.states[key][next_state_nsteps_idx].to(self.device)
+
+        # Apply image augmentation in a batched way if needed
+        if self.use_drq and image_keys:
+            # Concatenate all images from state and next_state
+            all_images = []
+            for key in image_keys:
+                all_images.append(batch_state[key])
+                all_images.append(batch_next_state[key])
+                all_images.append(batch_next_state_nsteps[key])
+
+            # Optimization: Batch all images and apply augmentation once
+            all_images_tensor = torch.cat(all_images, dim=0)
+            augmented_images = self.image_augmentation_function(all_images_tensor)
+
+            # Split the augmented images back to their sources
+            for i, key in enumerate(image_keys):
+                # Calculate offsets for the current image key:
+                # For each key, we have 3*batch_size images (batch_size for states, batch_size for next_states)
+                # States start at index i*2*batch_size and take up batch_size slots
+                batch_state[key] = augmented_images[i * 3 * batch_size : (i * 3 + 1) * batch_size]
+                # Next states start after the states at index (i*2+1)*batch_size and also take up batch_size slots
+                batch_next_state[key] = augmented_images[(i * 3 + 1) * batch_size : (i * 3 + 2) * batch_size]
+                # Next states n-steps start after the next states at index (i*3+2)*batch_size and also take up batch_size slots
+                batch_next_state_nsteps[key] = augmented_images[
+                    (i * 3 + 2) * batch_size : (i * 3 + 3) * batch_size
+                ]
+
+        # Sample other tensors
+        # batch_actions = self.actions[idx].to(self.device)
+        # batch_rewards = self.rewards[idx].to(self.device)
+        # batch_dones = self.dones[idx].to(self.device).float()
+        # batch_dones = torch.logical_or(self.dones[idx], self.truncateds[idx]).to(self.device).float()
+        # batch_truncateds = self.truncateds[idx].to(self.device).float()
+
+        # Sample complementary_info if available
+        batch_complementary_info = None
+        if self.has_complementary_info:
+            batch_complementary_info = {}
+            for key in self.complementary_info_keys:
+                batch_complementary_info[key] = self.complementary_info[key][idx].to(self.device)
+
+        return BatchTransitionNStepsSB3(
+            state=batch_state,
+            # action=batch_actions[:,0],
+            action=batch_actions,
+            action_is_pad=batch_actions_is_pad,
+            # action_is_pad=torch.zeros((*batch_actions.shape[:-1],), dtype=torch.bool, device=self.device),
+            # reward=batch_rewards,
+            # next_state=batch_next_state,
+            # done=batch_dones,
+            # truncated=batch_truncateds,
+            complementary_info=batch_complementary_info,
+            # action_nsteps=batch_actions[:, 1:],  # Get all but the first element
+            # action_nsteps_is_pad=batch_actions_is_pad[:, 1:],  # Get all but the first element
+            reward=batch_rewards_nsteps,
+            next_state=batch_next_state_nsteps,
+            done=batch_dones_nsteps,
+            truncated=batch_truncateds_nsteps,
+            discount=batch_discounts_nsteps,
+            # mc_returns=batch_mc_returns,
         )
 
     def get_iterator(
@@ -759,7 +987,7 @@ class ReplayBuffer:
                 reward=data["reward"],
                 next_state=data["next_state"],
                 done=data["done"],
-                truncated=False,  # NOTE: Truncation are not supported yet in lerobot dataset
+                truncated=data["truncated"],  # NOTE: Truncation are not supported yet in lerobot dataset
                 complementary_info=data.get("complementary_info", None),
             )
 
@@ -947,7 +1175,15 @@ class ReplayBuffer:
                         done = True
 
             # TODO: (azouitine) Handle truncation (using the same value as done for now)
-            truncated = done
+            truncated = False
+            if not done:
+                # If this is the last frame or if next frame is in a different episode, mark as truncated
+                if i == num_frames - 1:
+                    truncated = True
+                elif i < num_frames - 1:
+                    next_sample = dataset[i + 1]
+                    if next_sample["episode_index"] != current_sample["episode_index"]:
+                        truncated = True
 
             # ----- 4) Next state -----
             # If not done and the next sample is in the same episode, we pull the next sample's state.

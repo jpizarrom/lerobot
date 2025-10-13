@@ -405,8 +405,11 @@ def add_actor_information_and_train(
                             for k, v in observations.items()
                             if "observation.images" in k
                         },
+                        **{"action": actions},
                     }
                 )
+
+                actions = observations["action"]
 
                 observations = {
                     **{"observation.state": observations["observation.state"]},
@@ -458,10 +461,14 @@ def add_actor_information_and_train(
                     "terminal": batch.get("terminals"),
                     "mask": batch.get("masks"),
                     "valid": batch.get("valid"),
-                    "next_state": batch["next_state"],
+                    "next_state": next_observations,
                     "observation_feature": observation_features,
                     "next_observation_feature": next_observation_features,
                     "complementary_info": batch.get("complementary_info"),
+                    "done": batch.get("done"),
+                    "truncated": batch.get("truncated"),
+                    "action_is_pad": batch.get("action_is_pad"),
+                    "discount": batch.get("discount"),
                 }
 
                 # Use the forward method for critic loss
@@ -494,8 +501,11 @@ def add_actor_information_and_train(
                     **{
                         k: v.permute(0, 2, 3, 1) for k, v in observations.items() if "observation.images" in k
                     },
+                    **{"action": actions},
                 }
             )
+
+            actions = observations["action"]
 
             observations = {
                 **{"observation.state": observations["observation.state"]},
@@ -545,10 +555,14 @@ def add_actor_information_and_train(
                 "terminal": batch.get("terminals"),
                 "mask": batch.get("masks"),
                 "valid": batch.get("valid"),
-                "next_state": batch["next_state"],
+                "next_state": next_observations,
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch.get("complementary_info"),
+                "done": batch.get("done"),
+                "truncated": batch.get("truncated"),
+                "action_is_pad": batch.get("action_is_pad"),
+                "discount": batch.get("discount"),
             }
 
             critic_output = policy.forward(forward_batch, model="critic")
@@ -739,8 +753,10 @@ def add_actor_information_and_train(
                     **{
                         k: v.permute(0, 2, 3, 1) for k, v in observations.items() if "observation.images" in k
                     },
+                    **{"action": actions},
                 }
             )
+            actions = observations["action"]
 
             observations = {
                 **{"observation.state": observations["observation.state"]},
@@ -793,6 +809,10 @@ def add_actor_information_and_train(
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch["complementary_info"],
+                "done": batch.get("done"),
+                "truncated": batch.get("truncated"),
+                "action_is_pad": batch.get("action_is_pad"),
+                "discount": batch.get("discount"),
             }
 
             # Use the forward method for critic loss
@@ -831,8 +851,10 @@ def add_actor_information_and_train(
                 **{"observation.state": observations["observation.state"]},
                 # [B, C, H, W] -> [B, H, W, C]
                 **{k: v.permute(0, 2, 3, 1) for k, v in observations.items() if "observation.images" in k},
+                **{"action": actions},
             }
         )
+        actions = observations["action"]
 
         observations = {
             **{"observation.state": observations["observation.state"]},
@@ -864,6 +886,10 @@ def add_actor_information_and_train(
             next_state=next_observations,
         )
 
+        observation_features, next_observation_features = get_observation_features(
+            policy=policy, observations=observations, next_observations=next_observations
+        )
+
         # Create a batch dictionary with all required elements for the forward method
         forward_batch = {
             ACTION: actions,
@@ -876,6 +902,10 @@ def add_actor_information_and_train(
             # "done": done,
             "observation_feature": observation_features,
             "next_observation_feature": next_observation_features,
+            "done": batch.get("done"),
+            "truncated": batch.get("truncated"),
+            "action_is_pad": batch.get("action_is_pad"),
+            "discount": batch.get("discount"),
         }
 
         critic_output = policy.forward(forward_batch, model="critic")
