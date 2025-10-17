@@ -70,9 +70,10 @@ from lerobot.constants import (
 )
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.policies.factory import make_policy
+
 # from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.policies.acfql.modeling_acfql import ACFQLPolicy
+from lerobot.policies.factory import make_policy
 from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.scripts.rl import learner_service
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
@@ -83,7 +84,7 @@ from lerobot.transport.utils import (
     bytes_to_transitions,
     state_to_bytes,
 )
-from lerobot.utils.buffer import ReplayBuffer, concatenate_batch_transitions
+from lerobot.utils.buffer import ReplayBuffer
 from lerobot.utils.process import ProcessSignalHandler
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
@@ -384,7 +385,7 @@ def add_actor_information_and_train(
             timers = {}
             time_for_one_optimization_step = time.time()
 
-            for _ in range(utd_ratio -1):
+            for _ in range(utd_ratio - 1):
                 # --- PROFILING: Data Loading ---
                 start_time = time.time()
                 batch = next(offline_iterator)
@@ -398,15 +399,19 @@ def add_actor_information_and_train(
                 check_nan_in_transition(
                     observations=observations,
                     actions=actions.reshape(actions.shape[0], -1),
-                    next_state=next_observations_nsteps
+                    next_state=next_observations_nsteps,
                 )
 
                 # --- PROFILING: Feature Extraction ---
                 start_time = time.time()
                 observation_features, next_observation_features = get_observation_features(
-                    policy=policy, observations=observations, next_observations=next_observations_nsteps,
+                    policy=policy,
+                    observations=observations,
+                    next_observations=next_observations_nsteps,
                 )
-                timers["feature_extraction"] = timers.get("feature_extraction", 0) + (time.time() - start_time)
+                timers["feature_extraction"] = timers.get("feature_extraction", 0) + (
+                    time.time() - start_time
+                )
 
                 # Use precomputed action embeddings from recorded dataset (now in state)
                 action_embedding = observations.get("action_embedding")
@@ -452,7 +457,6 @@ def add_actor_information_and_train(
             batch = next(offline_iterator)
             timers["data_loading"] = timers.get("data_loading", 0) + (time.time() - start_time)
 
-
             # Extract n-step batch components
             actions = batch["actions"]  # [B, h, action_dim]
             observations = batch["state"]
@@ -467,11 +471,13 @@ def add_actor_information_and_train(
             # --- PROFILING: Feature Extraction ---
             start_time = time.time()
             observation_features, next_observation_features = get_observation_features(
-                policy=policy, observations=observations, next_observations=next_observations_nsteps,
+                policy=policy,
+                observations=observations,
+                next_observations=next_observations_nsteps,
             )
             timers["feature_extraction"] = timers.get("feature_extraction", 0) + (time.time() - start_time)
 
-                # Use precomputed action embeddings from recorded dataset (now in state)
+            # Use precomputed action embeddings from recorded dataset (now in state)
             action_embedding = observations.get("action_embedding")
             next_action_embeddings = next_observations_nsteps.get("action_embedding")
 
@@ -486,6 +492,8 @@ def add_actor_information_and_train(
                 "next_state": batch["next_state"],
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
+                "action_embeddings": action_embedding,
+                "next_action_embeddings": next_action_embeddings,
                 "complementary_info": batch.get("complementary_info"),
             }
 
@@ -502,13 +510,14 @@ def add_actor_information_and_train(
             optimizers["critic"].step()
             timers["critic_update"] = timers.get("critic_update", 0) + (time.time() - start_time)
 
-
-            training_infos = {f"critic/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in critic_output["info"].items()}
+            training_infos = {
+                f"critic/{k}": v.item() if isinstance(v, torch.Tensor) else v
+                for k, v in critic_output["info"].items()
+            }
             training_infos["critic/grad_norm"] = critic_grad_norm
 
             if optimization_step % policy_update_freq == 0:
                 for _ in range(policy_update_freq):
-
                     # --- PROFILING: Actor BC Flow Update ---
                     start_time = time.time()
                     # Actor BC flow optimization
@@ -520,14 +529,20 @@ def add_actor_information_and_train(
                         parameters=policy.actor_bc_flow.parameters(), max_norm=clip_grad_norm_value
                     ).item()
                     optimizers["actor_bc_flow"].step()
-                    timers["actor_bc_flow_update"] = timers.get("actor_bc_flow_update", 0) + (time.time() - start_time)
-
+                    timers["actor_bc_flow_update"] = timers.get("actor_bc_flow_update", 0) + (
+                        time.time() - start_time
+                    )
 
                     # Add actor info to training info
                     # training_infos["actor_bc/loss"] = loss_actor_bc_flow.item()
                     training_infos["actor_bc/grad_norm"] = actor_bc_flow_grad_norm
 
-                    training_infos.update({f"actor_bc/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in actor_bc_flow_output["info"].items()})
+                    training_infos.update(
+                        {
+                            f"actor_bc/{k}": v.item() if isinstance(v, torch.Tensor) else v
+                            for k, v in actor_bc_flow_output["info"].items()
+                        }
+                    )
 
                     # --- PROFILING: Actor Onestep Flow Update ---
                     start_time = time.time()
@@ -540,13 +555,20 @@ def add_actor_information_and_train(
                         parameters=policy.actor_onestep_flow.parameters(), max_norm=clip_grad_norm_value
                     ).item()
                     optimizers["actor_onestep_flow"].step()
-                    timers["actor_onestep_flow_update"] = timers.get("actor_onestep_flow_update", 0) + (time.time() - start_time)
+                    timers["actor_onestep_flow_update"] = timers.get("actor_onestep_flow_update", 0) + (
+                        time.time() - start_time
+                    )
 
                     # Add actor info to training info
                     # training_infos["actor_one/loss"] = loss_actor_onestep_flow.item()
                     training_infos["actor_one/grad_norm"] = actor_onestep_flow_grad_norm
 
-                    training_infos.update({f"actor_one/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in actor_onestep_flow_output["info"].items()})
+                    training_infos.update(
+                        {
+                            f"actor_one/{k}": v.item() if isinstance(v, torch.Tensor) else v
+                            for k, v in actor_onestep_flow_output["info"].items()
+                        }
+                    )
 
             # # Push policy to actors periodically
             # if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
@@ -563,7 +585,9 @@ def add_actor_information_and_train(
                 time_for_one_optimization_step = time.time() - time_for_one_optimization_step
                 frequency_for_one_optimization_step = 1 / (time_for_one_optimization_step + 1e-9)
                 training_infos["Optimization frequency loop [Hz]"] = frequency_for_one_optimization_step
-                logging.info(f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}")
+                logging.info(
+                    f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}"
+                )
 
                 # --- PROFILING: Log timers ---
                 profile_log_str = "[PROFILING] "
@@ -575,7 +599,9 @@ def add_actor_information_and_train(
                 if wandb_logger:
                     wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")
 
-                logging.info(f"[LEARNER] Offline step {offline_step}/{offline_steps}, optimization step {optimization_step}")
+                logging.info(
+                    f"[LEARNER] Offline step {offline_step}/{offline_steps}, optimization step {optimization_step}"
+                )
 
             optimization_step += 1
 
@@ -651,11 +677,13 @@ def add_actor_information_and_train(
             check_nan_in_transition(
                 observations=observations,
                 actions=actions.reshape(actions.shape[0], -1),
-                next_state=next_observations_nsteps
+                next_state=next_observations_nsteps,
             )
 
             observation_features, next_observation_features = get_observation_features(
-                policy=policy, observations=observations, next_observations=next_observations_nsteps,
+                policy=policy,
+                observations=observations,
+                next_observations=next_observations_nsteps,
             )
 
             # Use precomputed action embeddings from recorded dataset (now in state)
@@ -704,11 +732,13 @@ def add_actor_information_and_train(
         check_nan_in_transition(
             observations=observations,
             actions=actions.reshape(actions.shape[0], -1),
-            next_state=next_observations_nsteps
+            next_state=next_observations_nsteps,
         )
 
         observation_features, next_observation_features = get_observation_features(
-            policy=policy, observations=observations, next_observations=next_observations_nsteps,
+            policy=policy,
+            observations=observations,
+            next_observations=next_observations_nsteps,
         )
 
         # Use precomputed action embeddings from recorded dataset (now in state)
@@ -741,13 +771,14 @@ def add_actor_information_and_train(
         ).item()
         optimizers["critic"].step()
 
-
-        training_infos = {f"critic/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in critic_output["info"].items()}
+        training_infos = {
+            f"critic/{k}": v.item() if isinstance(v, torch.Tensor) else v
+            for k, v in critic_output["info"].items()
+        }
         training_infos["critic/grad_norm"] = critic_grad_norm
 
         if optimization_step % policy_update_freq == 0:
             for _ in range(policy_update_freq):
-
                 # Actor BC flow optimization
                 actor_bc_flow_output = policy.forward(forward_batch, model="actor_bc_flow")
                 loss_actor_bc_flow = actor_bc_flow_output["loss_actor_bc_flow"]
@@ -762,7 +793,12 @@ def add_actor_information_and_train(
                 # training_infos["actor_bc/loss"] = loss_actor_bc_flow.item()
                 training_infos["actor_bc/grad_norm"] = actor_bc_flow_grad_norm
 
-                training_infos.update({f"actor_bc/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in actor_bc_flow_output["info"].items()})
+                training_infos.update(
+                    {
+                        f"actor_bc/{k}": v.item() if isinstance(v, torch.Tensor) else v
+                        for k, v in actor_bc_flow_output["info"].items()
+                    }
+                )
 
                 # Actor onestep flow optimization
                 actor_onestep_flow_output = policy.forward(forward_batch, model="actor_onestep_flow")
@@ -778,8 +814,12 @@ def add_actor_information_and_train(
                 # training_infos["actor_one/loss"] = loss_actor_onestep_flow.item()
                 training_infos["actor_one/grad_norm"] = actor_onestep_flow_grad_norm
 
-                training_infos.update({f"actor_one/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in actor_onestep_flow_output["info"].items()})
-
+                training_infos.update(
+                    {
+                        f"actor_one/{k}": v.item() if isinstance(v, torch.Tensor) else v
+                        for k, v in actor_onestep_flow_output["info"].items()
+                    }
+                )
 
         # Push policy to actors if needed
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:

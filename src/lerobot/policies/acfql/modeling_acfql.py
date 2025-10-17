@@ -28,8 +28,8 @@ from torch import Tensor
 
 from lerobot.policies.acfql.configuration_acfql import ACFQLConfig, is_image_feature
 from lerobot.policies.normalize import NormalizeBuffer, UnnormalizeBuffer
-from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.octo.modeling_octo import OctoPolicy
+from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import get_device_from_parameters
 
 
@@ -89,7 +89,9 @@ class ACFQLPolicy(
         raise NotImplementedError("SACPolicy does not support action chunking. It returns single actions!")
 
     @torch.no_grad()
-    def compute_flow_actions(self, observations, observations_features, noises: Tensor, action_embeddings) -> Tensor:
+    def compute_flow_actions(
+        self, observations, observations_features, noises: Tensor, action_embeddings
+    ) -> Tensor:
         actions = noises
         flow_steps = self.config.flow_steps
 
@@ -97,7 +99,9 @@ class ACFQLPolicy(
         for i in range(flow_steps):
             t_val = float(i) / flow_steps
             t = torch.full((actions.shape[0], 1), t_val, device=noises.device)
-            vels = self.actor_bc_flow(observations, observations_features, actions, t, action_embeddings=action_embeddings)
+            vels = self.actor_bc_flow(
+                observations, observations_features, actions, t, action_embeddings=action_embeddings
+            )
             actions = actions + vels / flow_steps
 
         actions = torch.clamp(actions, -1.0, 1.0)
@@ -177,7 +181,9 @@ class ACFQLPolicy(
 
         # Generate actions using one-step flow actor
         noises = torch.randn(batch_shape, action_dim, device=device)
-        actions, embedding = self.actor_onestep_flow(observations, observations_features, noises, return_action_embedding=True)
+        actions, embedding = self.actor_onestep_flow(
+            observations, observations_features, noises, return_action_embedding=True
+        )
         actions = torch.clamp(actions, -1.0, 1.0)
 
         # Reshape actions for chunking: [batch_size, chunk_size, action_dim_per_step]
@@ -291,7 +297,7 @@ class ACFQLPolicy(
                 done=done,
                 valid=valid,
                 observation_features=observation_features,
-                next_observation_features=next_observation_features
+                next_observation_features=next_observation_features,
             )
             return {"loss_total": loss_total, "info": info}
 
@@ -318,7 +324,7 @@ class ACFQLPolicy(
         done,
         valid,
         observation_features: Tensor | None = None,
-        next_observation_features: Tensor | None = None
+        next_observation_features: Tensor | None = None,
     ):
         # critic
         loss_c, info_c = self.compute_loss_critic(
@@ -348,9 +354,15 @@ class ACFQLPolicy(
         loss = loss_c + loss_bc + loss_one
 
         info = {}
-        info.update({f"critic/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in info_c.items()})
-        info.update({f"actor_bc/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in info_bc.items()})
-        info.update({f"actor_one/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in info_one.items()})
+        info.update(
+            {f"critic/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in info_c.items()}
+        )
+        info.update(
+            {f"actor_bc/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in info_bc.items()}
+        )
+        info.update(
+            {f"actor_one/{k}": v.item() if isinstance(v, torch.Tensor) else v for k, v in info_one.items()}
+        )
         info["total_loss"] = loss.item()
 
         return loss, info
@@ -369,7 +381,9 @@ class ACFQLPolicy(
     ) -> Tensor:
         with torch.no_grad():
             # Compute next actions
-            next_actions = self._compute_next_actions(next_observations, next_observation_features, next_action_embeddings=next_action_embeddings)
+            next_actions = self._compute_next_actions(
+                next_observations, next_observation_features, next_action_embeddings=next_action_embeddings
+            )
 
             # Compute Q-values for these actions
             next_qs = self.critic_forward(
@@ -394,9 +408,9 @@ class ACFQLPolicy(
                 next_q = next_qs.mean(dim=0)
 
             h = self.config.chunk_size
-            gamma_h = self.config.discount ** h
+            gamma_h = self.config.discount**h
             bootstrap_mask = done[:, -1].squeeze(-1)
-            td_target = rewards[:, -1] + gamma_h * bootstrap_mask  * next_q
+            td_target = rewards[:, -1] + gamma_h * bootstrap_mask * next_q
 
         # 3- compute predicted qs
         actions = actions[:, :, :].reshape(actions.shape[0], -1)  # [32, 150]
@@ -442,18 +456,22 @@ class ACFQLPolicy(
 
         # BC flow loss - action chunking version
         x_0 = torch.randn(batch_size, action_dim, device=observations["observation.state"].device)
-        x_1 = actions.reshape(batch_size, -1)  # Flatten the action dimension [batch_size, chunk_size * action_dim]
+        x_1 = actions.reshape(
+            batch_size, -1
+        )  # Flatten the action dimension [batch_size, chunk_size * action_dim]
         t = torch.rand(batch_size, 1, device=observations["observation.state"].device)
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
 
-        vel_pred = self.actor_bc_flow(observations, observation_features, x_t, t, action_embeddings=action_embeddings)
+        vel_pred = self.actor_bc_flow(
+            observations, observation_features, x_t, t, action_embeddings=action_embeddings
+        )
 
         # Reshape to match action chunking structure
         vel_pred = vel_pred.reshape(batch_size, self.config.chunk_size, -1)
         vel = vel.reshape(batch_size, self.config.chunk_size, -1)
 
-        bc_flow_loss =(((vel_pred - vel) ** 2) * valid[..., None]).mean()
+        bc_flow_loss = (((vel_pred - vel) ** 2) * valid[..., None]).mean()
 
         info = {
             "bc_flow_loss": bc_flow_loss,
@@ -477,11 +495,15 @@ class ACFQLPolicy(
         noises = torch.randn(batch_size, action_dim, device=observations["observation.state"].device)
 
         start_time = time.time()
-        target_flow_actions = self.compute_flow_actions(observations, observation_features, noises, action_embeddings)
+        target_flow_actions = self.compute_flow_actions(
+            observations, observation_features, noises, action_embeddings
+        )
         print(f"[PROFILING] compute_flow_actions: {(time.time() - start_time) * 1000:.2f}ms")
 
         start_time = time.time()
-        actor_actions = self.actor_onestep_flow(observations, observation_features, noises, action_embeddings=action_embeddings)
+        actor_actions = self.actor_onestep_flow(
+            observations, observation_features, noises, action_embeddings=action_embeddings
+        )
         print(f"[PROFILING] actor_onestep_flow forward: {(time.time() - start_time) * 1000:.2f}ms")
 
         distill_loss = F.mse_loss(input=actor_actions, target=target_flow_actions)
@@ -518,7 +540,10 @@ class ACFQLPolicy(
         return actor_onestep_flow_loss, info
 
     def _compute_next_actions(
-        self, next_observations: dict[str, Tensor], next_observation_features: Tensor | None = None, next_action_embeddings: Tensor | None = None
+        self,
+        next_observations: dict[str, Tensor],
+        next_observation_features: Tensor | None = None,
+        next_action_embeddings: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Compute next actions for target Q-value calculation.
 
@@ -530,7 +555,9 @@ class ACFQLPolicy(
 
         all_noises = torch.randn(batch_size, action_dim, device=device)
 
-        next_actions = self.actor_onestep_flow(next_observations, next_observation_features, all_noises, action_embeddings=next_action_embeddings)
+        next_actions = self.actor_onestep_flow(
+            next_observations, next_observation_features, all_noises, action_embeddings=next_action_embeddings
+        )
         next_actions = torch.clamp(next_actions, -1.0, 1.0)
 
         return next_actions
@@ -575,19 +602,19 @@ class ACFQLPolicy(
             else SACObservationEncoder(self.config, self.normalize_inputs)
         )
 
-        # self.encoder_actor_bc_flow = OctoEncodingWrapper(
-        #     self.octo_policy,
-        #     use_proprio=self.config.use_proprio,
-        #     state_dim=self.config.state_dim,
-        #     proprio_latent_dim=self.config.proprio_latent_dim,
-        # )
+        self.encoder_actor_bc_flow = OctoEncodingWrapper(
+            self.octo_policy,
+            use_proprio=self.config.use_proprio,
+            state_dim=self.config.state_dim,
+            proprio_latent_dim=self.config.proprio_latent_dim,
+        )
 
-        # self.encoder_actor_onestep_flow = OctoEncodingWrapper(
-        #     self.octo_policy,
-        #     use_proprio=self.config.use_proprio,
-        #     state_dim=self.config.state_dim,
-        #     proprio_latent_dim=self.config.proprio_latent_dim,
-        # )
+        self.encoder_actor_onestep_flow = OctoEncodingWrapper(
+            self.octo_policy,
+            use_proprio=self.config.use_proprio,
+            state_dim=self.config.state_dim,
+            proprio_latent_dim=self.config.proprio_latent_dim,
+        )
 
     def _init_critics(self, action_dim):
         """Build critic ensemble and targets"""
@@ -622,7 +649,9 @@ class ACFQLPolicy(
         self.actor_bc_flow = ActorVectorFieldPolicy(
             encoder=self.encoder_actor_bc_flow,
             network=MLP(
-                input_dim=self.encoder_actor_bc_flow.output_dim + action_dim * self.config.chunk_size + 1, # add one for time
+                input_dim=self.encoder_actor_bc_flow.output_dim
+                + action_dim * self.config.chunk_size
+                + 1,  # add one for time
                 **asdict(self.config.actor_network_kwargs),
             ),
             action_dim=action_dim * self.config.chunk_size,
@@ -943,6 +972,7 @@ class CriticEnsemble(nn.Module):
         observation_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import time
+
         device = get_device_from_parameters(self)
         # Move each tensor in observations to device
         observations = {k: v.to(device) for k, v in observations.items()}
@@ -1028,16 +1058,18 @@ class ActorVectorFieldPolicy(nn.Module):
             times (Tensor, optional): Times.
             is_encoded (bool): Whether the observations are already encoded.
         """
-        obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
-        # obs_enc, action_embeddings = self.encoder(
-        #     observations, tasks=tasks, action_embeddings=action_embeddings
-        # )
+        # obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+        obs_enc, action_embeddings = self.encoder(
+            observations, tasks=tasks, action_embeddings=action_embeddings
+        )
         inputs = [obs_enc, actions]
         if times is not None:
             inputs.append(times)
         x = torch.cat(inputs, dim=-1)
 
-        outputs = self.output_layer(self.network(x)) # TODO(lilkm): there is no layer norm here, matching JAX implementation
+        outputs = self.output_layer(
+            self.network(x)
+        )  # TODO(lilkm): there is no layer norm here, matching JAX implementation
 
         if return_action_embedding:
             return outputs, action_embeddings
