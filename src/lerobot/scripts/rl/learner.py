@@ -364,7 +364,7 @@ def add_actor_information_and_train(
     # PHASE 1: OFFLINE PRETRAINING
     # =============================================================================
 
-    if offline_steps > 0 and offline_replay_buffer is not None:
+    if offline_steps > 0 and offline_replay_buffer is not None and optimization_step < offline_steps:
         logging.info(f"[LEARNER] Starting offline pretraining for {offline_steps} steps")
 
         offline_iterator = offline_replay_buffer.get_iterator_nstep(
@@ -915,7 +915,7 @@ def save_training_checkpoint(
     # Save dataset
     # NOTE: Handle the case where the dataset repo id is not specified in the config
     # eg. RL training without demonstrations data
-    if replay_buffer is not None:
+    if replay_buffer is not None and len(replay_buffer) > 0:
         repo_id_buffer_save = cfg.env.task if dataset_repo_id is None else dataset_repo_id
         logging.info(f"Saving replay buffer to {dataset_dir} with repo id {repo_id_buffer_save}")
         replay_buffer.to_lerobot_dataset(repo_id=repo_id_buffer_save, fps=fps, root=dataset_dir)
@@ -995,7 +995,7 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_bc_flow.named_parameters()
-            # if not policy.config.shared_encoder or not n.startswith("encoder")
+            # if (not policy.config.shared_encoder or not n.startswith("encoder")) and p.requires_grad
             # if not any(n.startswith(p) for p in params_to_skip)
         ],
         lr=cfg.policy.actor_lr,
@@ -1004,12 +1004,14 @@ def make_optimizers_and_scheduler(cfg: TrainRLServerPipelineConfig, policy: nn.M
         params=[
             p
             for n, p in policy.actor_onestep_flow.named_parameters()
-            # if not policy.config.shared_encoder or not n.startswith("encoder")
+            # if (not policy.config.shared_encoder or not n.startswith("encoder")) and p.requires_grad
             # if not any(n.startswith(p) for p in params_to_skip)
         ],
         lr=cfg.policy.actor_lr,
     )
     optimizer_critic = torch.optim.Adam(params=policy.critic_ensemble.parameters(), lr=cfg.policy.critic_lr)
+    # optimizer_critic = torch.optim.Adam(params=[p for p in policy.critic_ensemble.parameters() if p.requires_grad], lr=cfg.policy.critic_lr)
+    # import pdb; pdb.set_trace()
 
     lr_scheduler = None
     optimizers = {
@@ -1308,7 +1310,7 @@ def check_nan_in_transition(
 
 
 def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
-    logging.debug("[LEARNER] Pushing actor policy to the queue")
+    logging.info("[LEARNER] Pushing actor policy to the queue")
 
     # Create a dictionary to hold all the state dicts
     state_dicts = {"policy": move_state_dict_to_device(policy.actor_onestep_flow.state_dict(), device="cpu")}
