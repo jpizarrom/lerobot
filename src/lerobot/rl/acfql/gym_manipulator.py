@@ -252,7 +252,7 @@ class RobotEnv(gym.Env):
             reward,
             terminated,
             truncated,
-            {TeleopEvents.IS_INTERVENTION: False},
+            {},
         )
 
     def render(self) -> None:
