@@ -99,7 +99,7 @@ from lerobot.utils.utils import (
     init_logging,
 )
 
-from .buffer import (
+from .buffer_sb3 import (
     ReplayBufferNSteps as ReplayBuffer,
     concatenate_batch_transitions_nstep as concatenate_batch_transitions,
 )
@@ -494,6 +494,10 @@ def add_actor_information_and_train(
                     "observation_feature": observation_features,
                     "next_observation_feature": next_observation_features,
                     "complementary_info": batch.get("complementary_info"),
+                    "done": batch.get("done"),
+                    "truncated": batch.get("truncated"),
+                    "action_is_pad": batch.get("action_is_pad"),
+                    "discount": batch.get("discount"),
                 }
 
                 # Use the forward method for critic loss
@@ -588,6 +592,10 @@ def add_actor_information_and_train(
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch.get("complementary_info"),
+                "done": batch.get("done"),
+                "truncated": batch.get("truncated"),
+                "action_is_pad": batch.get("action_is_pad"),
+                "discount": batch.get("discount"),
             }
 
             critic_output = policy.forward(forward_batch, model="critic")
@@ -786,7 +794,6 @@ def add_actor_information_and_train(
 
             # Extract n-step batch components
             actions = batch[ACTION]  # [B, h, action_dim]
-            rewards = batch["reward"]
             observations = batch["state"]
             next_observations = batch["next_state"]
             # done = batch["done"]
@@ -849,16 +856,20 @@ def add_actor_information_and_train(
             # Create a batch dictionary with all required elements for the forward method
             forward_batch = {
                 ACTION: actions,
-                "reward": rewards,
+                "reward": batch["reward"],
                 "state": observations,
-                "terminal": batch["terminals"],
-                "mask": batch["masks"],
-                "valid": batch["valid"],
+                "terminal": batch.get("terminals"),
+                "mask": batch.get("masks"),
+                "valid": batch.get("valid"),
                 "next_state": next_observations,
                 # "done": done,
                 "observation_feature": observation_features,
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch["complementary_info"],
+                "done": batch.get("done"),
+                "truncated": batch.get("truncated"),
+                "action_is_pad": batch.get("action_is_pad"),
+                "discount": batch.get("discount"),
             }
 
             # Use the forward method for critic loss
@@ -887,7 +898,6 @@ def add_actor_information_and_train(
 
         # Extract n-step batch components
         actions = batch[ACTION]  # [B, h, action_dim]
-        rewards = batch["reward"]
         observations = batch["state"]
         next_observations = batch["next_state"]
 
@@ -942,7 +952,7 @@ def add_actor_information_and_train(
         # Create a batch dictionary with all required elements for the forward method
         forward_batch = {
             ACTION: actions,
-            "reward": rewards,
+            "reward": batch["reward"],
             "state": observations,
             "terminal": batch.get("terminals"),
             "mask": batch.get("masks"),
@@ -951,6 +961,10 @@ def add_actor_information_and_train(
             # "done": done,
             "observation_feature": observation_features,
             "next_observation_feature": next_observation_features,
+            "done": batch.get("done"),
+            "truncated": batch.get("truncated"),
+            "action_is_pad": batch.get("action_is_pad"),
+            "discount": batch.get("discount"),
         }
 
         critic_output = policy.forward(forward_batch, model="critic")

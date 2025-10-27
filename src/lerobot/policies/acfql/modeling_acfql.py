@@ -197,24 +197,31 @@ class ACFQLPolicy(
         """
         # Extract common components from batch
         actions: Tensor = batch[ACTION]
+        actions_is_pad = batch["action_is_pad"]
         observations: dict[str, Tensor] = batch["state"]
         observation_features: Tensor = batch.get("observation_feature")
-        valid: Tensor = batch["valid"]
+        # valid: Tensor = batch["valid"]
 
         if model == "critic":
             # Extract critic-specific components
             rewards: Tensor = batch["reward"]
+            discounts: Tensor = batch["discount"]
             next_observations: dict[str, Tensor] = batch["next_state"]
-            done: Tensor = batch["mask"]
+            # done: Tensor = batch["mask"]
+            done: Tensor = batch["done"]
+            truncated: Tensor = batch["truncated"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
             loss_critic, info = self.compute_loss_critic(
                 observations=observations,
                 actions=actions,
+                actions_is_pad=actions_is_pad,
                 rewards=rewards,
+                discounts=discounts,
                 next_observations=next_observations,
                 done=done,
-                valid=valid,
+                # valid=valid,
+                truncated=truncated,
                 observation_features=observation_features,
                 next_observation_features=next_observation_features,
             )
@@ -226,7 +233,8 @@ class ACFQLPolicy(
                 observations=observations,
                 observation_features=observation_features,
                 actions=actions,
-                valid=valid,
+                # valid=valid,
+                actions_is_pad=actions_is_pad,
             )
             return {"loss_actor_bc_flow": loss_actor_bc_flow, "info": info}
         if model == "actor_onestep_flow":
@@ -239,18 +247,24 @@ class ACFQLPolicy(
 
         if model == "total":
             rewards: Tensor = batch["reward"]
+            discounts: Tensor = batch["discount"]
             next_observations: dict[str, Tensor] = batch["next_state"]
-            done: Tensor = batch["mask"]
-            valid: Tensor = batch["valid"]
+            # done: Tensor = batch["mask"]
+            # valid: Tensor = batch["valid"]
+            done: Tensor = batch["done"]
+            truncated: Tensor = batch["truncated"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
             loss_total, info = self.compute_total_loss(
                 observations=observations,
                 actions=actions,
+                action_is_pad=actions_is_pad,
                 rewards=rewards,
+                discounts=discounts,
                 next_observations=next_observations,
                 done=done,
-                valid=valid,
+                # valid=valid,
+                truncated=truncated,
                 observation_features=observation_features,
                 next_observation_features=next_observation_features,
             )
@@ -276,10 +290,13 @@ class ACFQLPolicy(
         self,
         observations,
         actions,
+        actions_is_pad,
         rewards,
+        discounts,
         next_observations,
         done,
-        valid,
+        # valid,
+        truncated,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
     ):
@@ -287,10 +304,13 @@ class ACFQLPolicy(
         loss_c, info_c = self.compute_loss_critic(
             observations=observations,
             actions=actions,
+            actions_is_pad=actions_is_pad,
             rewards=rewards,
+            discounts=discounts,
             next_observations=next_observations,
             done=done,
-            valid=valid,
+            # valid=valid,
+            truncated=truncated,
             observation_features=observation_features,
             next_observation_features=next_observation_features,
         )
@@ -300,7 +320,8 @@ class ACFQLPolicy(
             observations=observations,
             observation_features=observation_features,
             actions=actions,
-            valid=valid,
+            # valid=valid,
+            actions_is_pad=actions_is_pad,
         )
         loss_one, info_one = self.compute_loss_actor_onestep_flow(
             observations=observations,
@@ -328,10 +349,13 @@ class ACFQLPolicy(
         self,
         observations,
         actions,
+        actions_is_pad: Tensor,
         rewards,
+        discounts,
         next_observations,
         done,
-        valid,
+        # valid,
+        truncated,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
     ) -> Tensor:
@@ -361,10 +385,11 @@ class ACFQLPolicy(
             else:
                 next_q = next_qs.mean(dim=0)
 
-            h = self.config.chunk_size
-            gamma_h = self.config.discount**h
-            bootstrap_mask = done[:, -1].squeeze(-1)
-            td_target = rewards[:, -1] + gamma_h * bootstrap_mask * next_q
+            # h = self.config.chunk_size
+            # gamma_h = self.config.discount**h
+            # bootstrap_mask = done[:, -1].squeeze(-1)
+            # td_target = rewards[:, -1] + gamma_h * bootstrap_mask * next_q
+            td_target = rewards.squeeze(-1) + (1 - done) * discounts.squeeze(-1) * next_q
 
         # 3- compute predicted qs
         actions = actions[:, :, :].reshape(actions.shape[0], -1)  # [32, 150]
@@ -381,13 +406,37 @@ class ACFQLPolicy(
         td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
         # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
 
-        # Mask out invalid transitions
-        q_preds = q_preds[:, valid[:, -1].bool()]
-        td_target_duplicate = td_target_duplicate[:, valid[:, -1].bool()]
-        valid_rewards = rewards[valid[:, -1].bool(), -1]
+        # # Mask out invalid transitions
+        # q_preds = q_preds[:, valid[:, -1].bool()]
+        # td_target_duplicate = td_target_duplicate[:, valid[:, -1].bool()]
+        # valid_rewards = rewards[valid[:, -1].bool(), -1]
+
+        # # TD loss
+        # td_loss = ((q_preds - td_target_duplicate) ** 2).mean(dim=1).sum()
+
+        q_preds = q_preds[:, ~actions_is_pad[:, -1]]
+        td_target_duplicate = td_target_duplicate[:, ~actions_is_pad[:, -1]]
+        rewards_valid = rewards[~actions_is_pad[:, -1]]
 
         # TD loss
-        td_loss = ((q_preds - td_target_duplicate) ** 2).mean(dim=1).sum()
+        # td_loss = (((q_preds - td_target_duplicate) ** 2) * valid[:, -1]).mean(dim=1).sum()
+
+        # TODO: The td_target computation relies on the next state, which is problematic for
+        # truncated episodes where the next state is invalid when optimized buffer is used. While the `done` flag
+        # correctly handles terminal states by zeroing out the next_q term,
+        # truncated states require special handling to avoid incorrect loss calculation.
+
+        td_loss = F.mse_loss(
+            input=q_preds,
+            target=td_target_duplicate,
+            reduction="none",
+        )
+
+        # if self.config.mask_truncated_td_loss:
+        td_loss = td_loss * (1 - truncated[~actions_is_pad[:, -1]])
+
+        td_loss = td_loss.mean(dim=1)
+        td_loss = td_loss.sum()
 
         # Total critic loss
         critics_loss = td_loss
@@ -397,7 +446,8 @@ class ACFQLPolicy(
             "td_loss": td_loss,
             "predicted_qs": torch.mean(q_preds),
             "target_qs": torch.mean(td_target_duplicate),
-            "rewards": valid_rewards.mean(),
+            "rewards": rewards.mean(),
+            "rewards_valid": rewards_valid.mean(),
         }
 
         return critics_loss, info
@@ -407,7 +457,8 @@ class ACFQLPolicy(
         observations,
         observation_features: Tensor | None,
         actions: Tensor | None,
-        valid: Tensor | None,
+        # valid: Tensor | None,
+        actions_is_pad: Tensor | None,
     ) -> Tensor:
         batch_size = actions.shape[0]
         action_dim = self.actor_bc_flow.action_dim
@@ -427,7 +478,10 @@ class ACFQLPolicy(
         vel_pred = vel_pred.reshape(batch_size, self.config.chunk_size, -1)
         vel = vel.reshape(batch_size, self.config.chunk_size, -1)
 
-        bc_flow_loss = (((vel_pred - vel) ** 2) * valid[..., None]).mean()
+        # bc_flow_loss = (((vel_pred - vel) ** 2) * valid[..., None]).mean()
+        bc_flow_loss = F.mse_loss(input=vel_pred, target=vel, reduction="none")  # (128, 10, 3)
+        bc_flow_loss = bc_flow_loss * (~actions_is_pad).unsqueeze(-1)
+        bc_flow_loss = bc_flow_loss.mean()
 
         info = {
             "bc_flow_loss": bc_flow_loss,
